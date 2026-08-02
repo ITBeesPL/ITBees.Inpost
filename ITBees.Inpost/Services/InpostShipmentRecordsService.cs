@@ -43,7 +43,7 @@ public class InpostShipmentRecordsService : IInpostShipmentRecordsService
         {
             // Numer listu przewozowego nadawany jest asynchronicznie po zakupie oferty.
             result = _inpostShipXClient
-                .WaitForTrackingNumberAsync(settings, result.ShipmentId, TimeSpan.FromSeconds(45))
+                .WaitForTrackingNumberAsync(settings, result.ShipmentId, TimeSpan.FromSeconds(25))
                 .GetAwaiter().GetResult();
         }
 
