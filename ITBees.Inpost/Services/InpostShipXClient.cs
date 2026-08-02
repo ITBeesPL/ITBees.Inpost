@@ -130,6 +130,101 @@ public class InpostShipXClient : IInpostShipXClient
         return await response.Content.ReadAsByteArrayAsync(ct);
     }
 
+    public async Task<List<InpostPointVm>> SearchParcelLockersAsync(InpostSettings settings, string? search,
+        int limit = 25, CancellationToken ct = default)
+    {
+        var query = new List<string>
+        {
+            "type=parcel_locker",
+            "status=Operating",
+            $"per_page={Math.Clamp(limit, 1, 100)}"
+        };
+
+        var phrase = search?.Trim();
+        if (!string.IsNullOrWhiteSpace(phrase))
+        {
+            // Wyszukiwarka punktów ShipX filtruje osobnymi parametrami - dobieramy je po kształcie frazy:
+            // "31-000" to kod pocztowy, "KRA012" kod paczkomatu, pozostałe traktujemy jako miasto.
+            if (LooksLikePostCode(phrase))
+                query.Add($"post_code={Uri.EscapeDataString(phrase)}");
+            else if (LooksLikePointCode(phrase))
+                query.Add($"name={Uri.EscapeDataString(phrase.ToUpperInvariant())}");
+            else
+                query.Add($"city={Uri.EscapeDataString(phrase)}");
+        }
+
+        var url = $"{settings.BaseUrl.TrimEnd('/')}/v1/points?{string.Join("&", query)}";
+        using var request = CreateRequest(HttpMethod.Get, url, settings);
+
+        try
+        {
+            var response = await GetHttpClient().SendAsync(request, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                return new List<InpostPointVm>();
+            }
+
+            var body = await response.Content.ReadAsStringAsync(ct);
+            return ParsePoints(body);
+        }
+        catch (Exception)
+        {
+            return new List<InpostPointVm>();
+        }
+    }
+
+    private static bool LooksLikePostCode(string phrase) =>
+        phrase.Length is 5 or 6 && phrase.Count(char.IsDigit) == 5;
+
+    private static bool LooksLikePointCode(string phrase) =>
+        phrase.Length <= 12 && !phrase.Contains(' ') && phrase.Any(char.IsDigit) && phrase.Any(char.IsLetter);
+
+    private static List<InpostPointVm> ParsePoints(string responseBody)
+    {
+        var points = new List<InpostPointVm>();
+
+        using var doc = JsonDocument.Parse(responseBody);
+        if (!doc.RootElement.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+        {
+            return points;
+        }
+
+        foreach (var item in items.EnumerateArray())
+        {
+            var name = GetAsString(item, "name");
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            var point = new InpostPointVm
+            {
+                Name = name,
+                LocationDescription = GetAsString(item, "location_description")
+            };
+
+            // Adres punktu: address_details ma rozbite pola, address tylko dwie linie tekstu.
+            if (item.TryGetProperty("address_details", out var details) && details.ValueKind == JsonValueKind.Object)
+            {
+                var street = GetAsString(details, "street");
+                var buildingNumber = GetAsString(details, "building_number");
+                point.Street = string.Join(" ", new[] { street, buildingNumber }
+                    .Where(x => !string.IsNullOrWhiteSpace(x)));
+                point.City = GetAsString(details, "city");
+                point.PostCode = GetAsString(details, "post_code");
+            }
+            else if (item.TryGetProperty("address", out var address) && address.ValueKind == JsonValueKind.Object)
+            {
+                point.Street = GetAsString(address, "line1");
+                point.City = GetAsString(address, "line2");
+            }
+
+            points.Add(point);
+        }
+
+        return points;
+    }
+
     private static string? Validate(InpostSettings settings, CreateShipmentOrder order)
     {
         if (string.IsNullOrWhiteSpace(settings.ApiKey))
@@ -197,7 +292,13 @@ public class InpostShipXClient : IInpostShipXClient
     private HttpRequestMessage CreateRequest(HttpMethod method, string url, InpostSettings settings)
     {
         var request = new HttpRequestMessage(method, url);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.ApiKey);
+
+        // Publiczne endpointy (np. wyszukiwarka punktów) działają bez tokenu.
+        if (!string.IsNullOrWhiteSpace(settings.ApiKey))
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.ApiKey);
+        }
+
         return request;
     }
 

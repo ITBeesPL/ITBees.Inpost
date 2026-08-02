@@ -31,4 +31,11 @@ public interface IInpostShipXClient
 
     /// <summary>Pobiera etykietę przesyłki (PDF) lub null, gdy jeszcze niedostępna.</summary>
     Task<byte[]?> GetLabelAsync(InpostSettings settings, string shipmentId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Wyszukuje czynne paczkomaty po kodzie punktu, mieście lub kodzie pocztowym -
+    /// pozwala wybrać paczkomat z listy zamiast wpisywać kod ręcznie.
+    /// </summary>
+    Task<List<InpostPointVm>> SearchParcelLockersAsync(InpostSettings settings, string? search, int limit = 25,
+        CancellationToken ct = default);
 }
