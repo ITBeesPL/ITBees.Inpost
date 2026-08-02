@@ -138,6 +138,9 @@ public class InpostShipmentRecordsService : IInpostShipmentRecordsService
             x.TrackingNumber = string.IsNullOrEmpty(result.TrackingNumber)
                 ? x.TrackingNumber
                 : result.TrackingNumber;
+            // Powód, dla którego przesyłka nie dostała jeszcze numeru listu (np. nieudany zakup oferty),
+            // trafia na listę - inaczej operator widzi tylko pusty status.
+            x.ErrorMessage = string.IsNullOrEmpty(result.TrackingNumber) ? result.ErrorMessage : null;
         }).First();
 
         return new InpostShipmentRecordVm(updated);

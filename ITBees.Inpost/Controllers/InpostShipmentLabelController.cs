@@ -32,13 +32,17 @@ public class InpostShipmentLabelController : RestfulControllerBase<InpostShipmen
             return BadRequest(new { message = "Integracja z InPost nie jest skonfigurowana." });
         }
 
-        var pdf = await _inpostShipXClient.GetLabelAsync(settings, shipmentId);
-        if (pdf == null)
+        var label = await _inpostShipXClient.GetLabelWithDetailsAsync(settings, shipmentId);
+        if (label.Content == null)
         {
-            // ShipX udostępnia etykietę dopiero po zakupie oferty - chwilę po utworzeniu przesyłki.
-            return NotFound(new { message = "Etykieta nie jest jeszcze dostępna - spróbuj ponownie za chwilę." });
+            // ShipX udostępnia etykietę dopiero po zakupie oferty - pokazujemy konkretny powód z API.
+            return NotFound(new
+            {
+                message = label.ErrorMessage ??
+                          "Etykieta nie jest jeszcze dostępna - użyj przycisku Odśwież, aby dokończyć zakup oferty."
+            });
         }
 
-        return File(pdf, "application/pdf", $"inpost-label-{shipmentId}.pdf");
+        return File(label.Content, "application/pdf", $"inpost-label-{shipmentId}.pdf");
     }
 }

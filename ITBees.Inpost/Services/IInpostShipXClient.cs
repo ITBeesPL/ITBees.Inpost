@@ -33,6 +33,13 @@ public interface IInpostShipXClient
     Task<byte[]?> GetLabelAsync(InpostSettings settings, string shipmentId, CancellationToken ct = default);
 
     /// <summary>
+    /// Pobiera etykietę wraz z powodem niedostępności zwróconym przez ShipX -
+    /// pozwala pokazać operatorowi konkretną przyczynę zamiast ogólnego komunikatu.
+    /// </summary>
+    Task<InpostLabelResult> GetLabelWithDetailsAsync(InpostSettings settings, string shipmentId,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Wyszukuje czynne paczkomaty po kodzie punktu, mieście lub kodzie pocztowym -
     /// pozwala wybrać paczkomat z listy zamiast wpisywać kod ręcznie.
     /// </summary>

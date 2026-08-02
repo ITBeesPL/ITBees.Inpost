@@ -77,7 +77,8 @@ public class InpostShipXClient : IInpostShipXClient
         TimeSpan timeout, CancellationToken ct = default)
     {
         var deadline = DateTime.UtcNow + timeout;
-        var offerBought = false;
+        var buyAttempts = 0;
+        string? lastBuyError = null;
         InpostShipmentResult lastResult;
 
         do
@@ -89,45 +90,84 @@ public class InpostShipXClient : IInpostShipXClient
             }
 
             // ShipX przygotowuje oferty asynchronicznie; dopóki oferta nie zostanie kupiona,
-            // przesyłka nie dostanie numeru listu przewozowego ani etykiety.
-            if (!offerBought && IsAwaitingPurchase(lastResult.Status))
+            // przesyłka nie dostanie numeru listu przewozowego ani etykiety. Statusy bywają
+            // różne w zależności od usługi, więc próbujemy zakupu dla każdego stanu,
+            // z którego przesyłka może jeszcze przejść dalej.
+            if (buyAttempts < MaxBuyAttempts && CanStillBeBought(lastResult.Status))
             {
+                buyAttempts++;
                 var buyResult = await BuyShipmentOfferAsync(settings, shipmentId, ct);
-                offerBought = buyResult.Success;
-                if (!buyResult.Success)
+                if (buyResult.Success)
                 {
-                    lastResult.ErrorMessage = buyResult.ErrorMessage;
+                    lastBuyError = null;
+                }
+                else
+                {
+                    lastBuyError = buyResult.ErrorMessage;
                 }
             }
 
             await Task.Delay(TimeSpan.FromSeconds(2), ct);
         } while (DateTime.UtcNow < deadline);
 
+        // Bez numeru listu warto pokazać operatorowi, dlaczego zakup oferty się nie powiódł.
+        if (string.IsNullOrEmpty(lastResult.TrackingNumber) && !string.IsNullOrEmpty(lastBuyError))
+        {
+            lastResult.ErrorMessage = lastBuyError;
+        }
+
         return lastResult;
     }
 
+    private const int MaxBuyAttempts = 3;
+
     /// <summary>
-    /// Statusy ShipX, w których przesyłka czeka na zakup oferty
-    /// (po nim nadawany jest numer listu przewozowego i udostępniana etykieta).
+    /// Czy przesyłka w danym statusie może jeszcze zostać opłacona. Statusy końcowe
+    /// (potwierdzona, w drodze, anulowana) nie wymagają już zakupu oferty.
     /// </summary>
-    private static bool IsAwaitingPurchase(string? status)
+    private static bool CanStillBeBought(string? status)
     {
-        return status is "offer_selected" or "offers_prepared";
+        if (string.IsNullOrWhiteSpace(status))
+        {
+            return true;
+        }
+
+        return status is not ("confirmed" or "dispatched_by_sender" or "collected_from_sender"
+            or "canceled" or "cancelled" or "delivered" or "returned");
     }
 
     public async Task<byte[]?> GetLabelAsync(InpostSettings settings, string shipmentId,
         CancellationToken ct = default)
     {
+        return (await GetLabelWithDetailsAsync(settings, shipmentId, ct)).Content;
+    }
+
+    public async Task<InpostLabelResult> GetLabelWithDetailsAsync(InpostSettings settings, string shipmentId,
+        CancellationToken ct = default)
+    {
         var url = $"{settings.BaseUrl.TrimEnd('/')}/v1/shipments/{shipmentId}/label?format=Pdf";
         using var request = CreateRequest(HttpMethod.Get, url, settings);
 
-        var response = await GetHttpClient().SendAsync(request, ct);
-        if (!response.IsSuccessStatusCode)
+        HttpResponseMessage response;
+        try
         {
-            return null;
+            response = await GetHttpClient().SendAsync(request, ct);
+        }
+        catch (Exception ex)
+        {
+            return new InpostLabelResult { ErrorMessage = $"Błąd połączenia z API InPost: {ex.Message}" };
         }
 
-        return await response.Content.ReadAsByteArrayAsync(ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync(ct);
+            return new InpostLabelResult
+            {
+                ErrorMessage = ExtractErrorMessage(errorBody, (int)response.StatusCode)
+            };
+        }
+
+        return new InpostLabelResult { Content = await response.Content.ReadAsByteArrayAsync(ct) };
     }
 
     public async Task<List<InpostPointVm>> SearchParcelLockersAsync(InpostSettings settings, string? search,
