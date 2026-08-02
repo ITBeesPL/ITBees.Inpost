@@ -6,6 +6,10 @@ Biblioteka pozwala tworzyć przesyłki (listy przewozowe) w API InPost ShipX:
 - przesyłki kurierskie InPost (`inpost_courier_standard`) - gabaryty `small`/`medium`/`large`/`xlarge`,
 - pobieranie numeru listu przewozowego (tracking number) oraz etykiety PDF.
 
+Dodatkowo udostępnia wyszukiwarkę paczkomatów (`IInpostShipXClient.SearchParcelLockersAsync`
+oraz endpoint `GET /InpostParcelLockers?search=`), dzięki której punkt docelowy wybiera się
+z listy (po mieście, kodzie pocztowym lub kodzie paczkomatu) zamiast wpisywać kod ręcznie.
+
 Zawiera też gotowy moduł ustawień integracji dla paneli administracyjnych ITBees
 (wzorzec jak w ITBees.ServerStatus): encję `InpostIntegrationSettings` (token,
 organization id, sandbox - przechowywane w bazie aplikacji hosta), serwis
