@@ -14,5 +14,6 @@ public class InpostSetup
     {
         services.AddInpostShipX();
         services.AddTransient<IInpostIntegrationSettingsService, InpostIntegrationSettingsService>();
+        services.AddTransient<IInpostShipmentRecordsService, InpostShipmentRecordsService>();
     }
 }

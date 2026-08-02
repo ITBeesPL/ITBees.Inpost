@@ -12,5 +12,10 @@ public static class DbModelBuilder
     public static void Register(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<InpostIntegrationSettings>().HasKey(x => x.Id);
+
+        modelBuilder.Entity<InpostShipment>().HasKey(x => x.Id);
+        modelBuilder.Entity<InpostShipment>().HasIndex(x => x.Created);
+        modelBuilder.Entity<InpostShipment>().HasIndex(x => x.ExternalGuid);
+        modelBuilder.Entity<InpostShipment>().HasIndex(x => x.ExternalId);
     }
 }
