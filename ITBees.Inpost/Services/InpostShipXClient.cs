@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ITBees.Inpost.Models;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -89,11 +90,76 @@ public class InpostShipXClient : IInpostShipXClient
         return await SendAndParseShipmentAsync(request, ct);
     }
 
+    public async Task<InpostShipmentResult> RefreshOffersAsync(InpostSettings settings, string shipmentId,
+        CancellationToken ct = default)
+    {
+        var current = await GetShipmentAsync(settings, shipmentId, ct);
+        if (!current.Success || string.IsNullOrEmpty(current.RawJson))
+        {
+            return current;
+        }
+
+        var body = BuildResendBody(current.RawJson);
+        if (body == null)
+        {
+            return new InpostShipmentResult
+            {
+                Success = false,
+                Status = current.Status,
+                ErrorMessage = "Nie udało się odtworzyć danych przesyłki, aby pobrać nową ofertę z InPost."
+            };
+        }
+
+        var url = $"{settings.BaseUrl.TrimEnd('/')}/v1/shipments/{shipmentId}";
+        using var request = CreateRequest(HttpMethod.Put, url, settings);
+        request.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
+
+        return await SendAndParseShipmentAsync(request, ct);
+    }
+
+    /// <summary>
+    /// Buduje treść żądania aktualizacji przesyłki na podstawie jej aktualnego stanu w ShipX -
+    /// ponowne wysłanie tych samych danych powoduje przygotowanie świeżych ofert.
+    /// </summary>
+    private static JsonObject? BuildResendBody(string shipmentJson)
+    {
+        JsonNode? root;
+        try
+        {
+            root = JsonNode.Parse(shipmentJson);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+
+        if (root is not JsonObject shipment)
+        {
+            return null;
+        }
+
+        var body = new JsonObject();
+        foreach (var propertyName in new[]
+                 {
+                     "receiver", "parcels", "custom_attributes", "service", "reference", "comments",
+                     "insurance", "cod", "additional_services", "external_customer_id"
+                 })
+        {
+            if (shipment.TryGetPropertyValue(propertyName, out var value) && value != null)
+            {
+                body[propertyName] = value.DeepClone();
+            }
+        }
+
+        return body.ContainsKey("receiver") && body.ContainsKey("parcels") ? body : null;
+    }
+
     public async Task<InpostShipmentResult> WaitForTrackingNumberAsync(InpostSettings settings, string shipmentId,
         TimeSpan timeout, CancellationToken ct = default)
     {
         var deadline = DateTime.UtcNow + timeout;
         var buyAttempts = 0;
+        var offersRefreshed = false;
         string? lastBuyError = null;
         InpostShipmentResult lastResult;
 
@@ -121,6 +187,19 @@ public class InpostShipXClient : IInpostShipXClient
                 else
                 {
                     lastBuyError = buyResult.ErrorMessage;
+
+                    // Oferty ShipX wygasają - dla starszych przesyłek trzeba poprosić o nowe,
+                    // wysyłając te same dane ponownie, i dopiero wtedy kupować.
+                    if (!offersRefreshed && IsOfferExpired(buyResult.ErrorMessage))
+                    {
+                        offersRefreshed = true;
+                        buyAttempts = 0;
+                        var refreshResult = await RefreshOffersAsync(settings, shipmentId, ct);
+                        if (!refreshResult.Success)
+                        {
+                            lastBuyError = refreshResult.ErrorMessage ?? lastBuyError;
+                        }
+                    }
                 }
             }
 
@@ -130,6 +209,13 @@ public class InpostShipXClient : IInpostShipXClient
         // Bez numeru listu warto pokazać operatorowi, dlaczego zakup oferty się nie powiódł.
         if (string.IsNullOrEmpty(lastResult.TrackingNumber))
         {
+            if (IsOfferExpired(lastBuyError))
+            {
+                lastBuyError =
+                    "Oferta przewozu InPost wygasła i nie udało się pobrać nowej. " +
+                    "Usuń ten wpis i wygeneruj list przewozowy ponownie.";
+            }
+
             lastResult.ErrorMessage = lastBuyError ?? (lastResult.SelectedOfferId == null
                 ? $"InPost nie przygotował jeszcze oferty przewozu (status: {lastResult.Status ?? "brak"}). " +
                   "Użyj przycisku Odśwież za chwilę."
@@ -141,6 +227,12 @@ public class InpostShipXClient : IInpostShipXClient
     }
 
     private const int MaxBuyAttempts = 3;
+
+    private static bool IsOfferExpired(string? errorMessage)
+    {
+        return errorMessage != null &&
+               (errorMessage.Contains("offer_is_not_available") || errorMessage.Contains("offer_expired"));
+    }
 
     /// <summary>
     /// Czy przesyłka w danym statusie może jeszcze zostać opłacona. Statusy końcowe

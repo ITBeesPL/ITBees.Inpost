@@ -23,6 +23,13 @@ public interface IInpostShipXClient
         long? offerId = null, CancellationToken ct = default);
 
     /// <summary>
+    /// Wymusza przygotowanie nowych ofert przewozu dla istniejącej przesyłki (oferty ShipX wygasają).
+    /// Odtwarza dane przesyłki z API i wysyła je ponownie metodą PUT.
+    /// </summary>
+    Task<InpostShipmentResult> RefreshOffersAsync(InpostSettings settings, string shipmentId,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Czeka (odpytując API) aż przesyłka otrzyma numer listu przewozowego,
     /// maksymalnie przez podany czas. Zwraca ostatni znany stan przesyłki.
     /// </summary>
