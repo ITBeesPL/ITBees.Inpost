@@ -28,6 +28,9 @@ public class InpostShipmentResult
     /// <summary>Status ostatniej transakcji rozliczeniowej (success/failure) - rozstrzyga o problemach z kontem.</summary>
     public string? LastTransactionStatus { get; set; }
 
+    /// <summary>Kod błędu rozliczenia z ShipX, np. debt_collection (zaległości / brak środków).</summary>
+    public string? LastTransactionError { get; set; }
+
     /// <summary>Rodzaj problemu - decyduje, czy ponawiać próbę i co pokazać operatorowi.</summary>
     public InpostErrorKind ErrorKind { get; set; } = InpostErrorKind.None;
 

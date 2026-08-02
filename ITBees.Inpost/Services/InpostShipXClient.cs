@@ -108,7 +108,7 @@ public class InpostShipXClient : IInpostShipXClient
         // przez pierwsze sekundy nie przeszkadzamy mu własnym zakupem.
         var buyNotBefore = DateTime.UtcNow + AutoPurchaseGracePeriod;
         var buyAttempts = 0;
-        var offersRefreshed = false;
+        var offersRefreshed = 0;
         InpostShipmentResult? failedBuy = null;
         InpostShipmentResult lastResult;
 
@@ -138,6 +138,16 @@ public class InpostShipXClient : IInpostShipXClient
                 {
                     failedBuy = buyResult;
 
+                    // O przyczynie rozstrzyga transakcja rozliczeniowa ShipX, a nie treść błędu z /buy:
+                    // przy zaległościach (debt_collection) /buy zwraca mylące offer_is_not_available.
+                    var afterBuy = await GetShipmentAsync(settings, shipmentId, ct);
+                    if (afterBuy.LastTransactionStatus == "failure")
+                    {
+                        lastResult = afterBuy;
+                        failedBuy.ErrorKind = InpostErrorKind.AccountProblem;
+                        break;
+                    }
+
                     // Problem konta lub usługi InPost - ponawianie niczego nie zmieni.
                     if (buyResult.ErrorKind == InpostErrorKind.AccountProblem)
                     {
@@ -145,9 +155,9 @@ public class InpostShipXClient : IInpostShipXClient
                     }
 
                     // Oferty ShipX wygasają po kilku minutach; pusty PUT generuje nowe.
-                    if (!offersRefreshed && buyResult.ErrorKind == InpostErrorKind.OfferExpired)
+                    if (offersRefreshed < MaxOfferRefreshes && buyResult.ErrorKind == InpostErrorKind.OfferExpired)
                     {
-                        offersRefreshed = true;
+                        offersRefreshed++;
                         buyAttempts = 0;
                         await RefreshOffersAsync(settings, shipmentId, ct);
                     }
@@ -167,6 +177,7 @@ public class InpostShipXClient : IInpostShipXClient
     }
 
     private const int MaxBuyAttempts = 2;
+    private const int MaxOfferRefreshes = 2;
     private static readonly TimeSpan AutoPurchaseGracePeriod = TimeSpan.FromSeconds(10);
 
     /// <summary>
@@ -186,14 +197,30 @@ public class InpostShipXClient : IInpostShipXClient
         if (shipment.LastTransactionStatus == "failure" ||
             failedBuy?.ErrorKind == InpostErrorKind.AccountProblem)
         {
-            return "InPost nie opłacił przesyłki. Sprawdź saldo i dane rozliczeniowe konta InPost " +
-                   "(Menedżer Paczek → Płatności oraz Moje konto → Dane). To nie jest błąd aplikacji. " +
-                   $"Status przesyłki: {status}.";
+            var reason = shipment.LastTransactionError switch
+            {
+                "debt_collection" => "InPost odrzucił płatność (debt_collection - zaległości lub brak środków " +
+                                     "na koncie InPost)",
+                null or "" => "InPost nie opłacił przesyłki",
+                _ => $"InPost odrzucił płatność ({shipment.LastTransactionError})"
+            };
+
+            return $"{reason}. Ureguluj saldo / dane rozliczeniowe w Menedżerze Paczek InPost " +
+                   $"i użyj przycisku Odśwież. To nie jest błąd aplikacji. Status przesyłki: {status}.";
         }
 
         if (failedBuy?.ErrorKind == InpostErrorKind.DataOrCode && !string.IsNullOrWhiteSpace(failedBuy.ErrorMessage))
         {
             return failedBuy.ErrorMessage;
+        }
+
+        if (failedBuy?.ErrorKind == InpostErrorKind.OfferExpired)
+        {
+            var offerStatus = shipment.SelectedOfferStatus ?? "nieznany";
+            return "InPost nie pozwolił opłacić oferty przewozu " +
+                   $"(status przesyłki: {status}, status oferty: {offerStatus}). " +
+                   "Jeśli powtórne Odśwież nie pomoże, sprawdź saldo i dane rozliczeniowe konta InPost " +
+                   "w Menedżerze Paczek, albo utwórz list przewozowy ponownie.";
         }
 
         return $"InPost nie zakończył jeszcze opłacania przesyłki (status: {status}). " +
@@ -489,6 +516,7 @@ public class InpostShipXClient : IInpostShipXClient
             using var doc = JsonDocument.Parse(responseBody);
             var root = doc.RootElement;
             var buyableOffer = ExtractBuyableOffer(root);
+            var lastTransaction = ExtractLastTransaction(root);
 
             return new InpostShipmentResult
             {
@@ -499,7 +527,8 @@ public class InpostShipXClient : IInpostShipXClient
                 SelectedOfferId = buyableOffer.offerId,
                 SelectedOfferStatus = buyableOffer.status,
                 OfferUnavailabilityReasons = buyableOffer.unavailabilityReasons,
-                LastTransactionStatus = ExtractLastTransactionStatus(root),
+                LastTransactionStatus = lastTransaction.status,
+                LastTransactionError = lastTransaction.error,
                 RawJson = responseBody
             };
         }
@@ -613,26 +642,37 @@ public class InpostShipXClient : IInpostShipXClient
         }
     }
 
-    /// <summary>Status ostatniej transakcji rozliczeniowej - "failure" wskazuje na problem z kontem InPost.</summary>
-    private static string? ExtractLastTransactionStatus(JsonElement root)
+    /// <summary>
+    /// Stan ostatniej transakcji rozliczeniowej ShipX. To ona rozstrzyga, czy przesyłka nie została
+    /// opłacona z powodu konta (np. debt_collection = zaległości/brak środków).
+    /// </summary>
+    private static (string? status, string? error) ExtractLastTransaction(JsonElement root)
     {
         if (!root.TryGetProperty("transactions", out var transactions) ||
             transactions.ValueKind != JsonValueKind.Array)
         {
-            return null;
+            return (null, null);
         }
 
         string? lastStatus = null;
+        string? lastError = null;
+
         foreach (var transaction in transactions.EnumerateArray())
         {
             var status = GetAsString(transaction, "status");
-            if (!string.IsNullOrWhiteSpace(status))
+            if (string.IsNullOrWhiteSpace(status))
             {
-                lastStatus = status;
+                continue;
             }
+
+            lastStatus = status;
+            lastError = transaction.TryGetProperty("details", out var details) &&
+                        details.ValueKind == JsonValueKind.Object
+                ? GetAsString(details, "error") ?? GetAsString(details, "message")
+                : null;
         }
 
-        return lastStatus;
+        return (lastStatus, lastError);
     }
 
     /// <summary>
@@ -648,14 +688,19 @@ public class InpostShipXClient : IInpostShipXClient
 
         var body = responseBody.ToLowerInvariant();
 
-        if (body.Contains("offer_expired"))
+        // Rozliczenia - ponawianie nic nie da, trzeba naprawić konto w Menedżerze Paczek.
+        if (body.Contains("transaction_failed") || body.Contains("debt_collection") ||
+            body.Contains("insufficient") || body.Contains("payment"))
+            return InpostErrorKind.AccountProblem;
+
+        // offer_is_not_available znaczy tylko tyle, że oferta nie jest w statusie available/selected -
+        // najczęściej wygasła (oferty żyją ok. 5 minut). Rozwiązaniem jest wygenerowanie nowych ofert.
+        if (body.Contains("offer_expired") || body.Contains("offer_is_not_available") ||
+            body.Contains("offer_unavailable"))
             return InpostErrorKind.OfferExpired;
+
         if (body.Contains("shipment_locked"))
             return InpostErrorKind.Transient;
-        if (body.Contains("offer_is_not_available") || body.Contains("offer_unavailable") ||
-            body.Contains("transaction_failed") || body.Contains("debt_collection") ||
-            body.Contains("insufficient"))
-            return InpostErrorKind.AccountProblem;
 
         return statusCode >= 500 ? InpostErrorKind.Transient : InpostErrorKind.DataOrCode;
     }
