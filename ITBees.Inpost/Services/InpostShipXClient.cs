@@ -1,7 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using ITBees.Inpost.Models;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -93,74 +92,24 @@ public class InpostShipXClient : IInpostShipXClient
     public async Task<InpostShipmentResult> RefreshOffersAsync(InpostSettings settings, string shipmentId,
         CancellationToken ct = default)
     {
-        var current = await GetShipmentAsync(settings, shipmentId, ct);
-        if (!current.Success || string.IsNullOrEmpty(current.RawJson))
-        {
-            return current;
-        }
-
-        var body = BuildResendBody(current.RawJson);
-        if (body == null)
-        {
-            return new InpostShipmentResult
-            {
-                Success = false,
-                Status = current.Status,
-                ErrorMessage = "Nie udało się odtworzyć danych przesyłki, aby pobrać nową ofertę z InPost."
-            };
-        }
-
+        // Udokumentowany sposób wygenerowania nowych ofert: pusty PUT na przesyłkę.
         var url = $"{settings.BaseUrl.TrimEnd('/')}/v1/shipments/{shipmentId}";
         using var request = CreateRequest(HttpMethod.Put, url, settings);
-        request.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
+        request.Content = new StringContent("{}", Encoding.UTF8, "application/json");
 
         return await SendAndParseShipmentAsync(request, ct);
-    }
-
-    /// <summary>
-    /// Buduje treść żądania aktualizacji przesyłki na podstawie jej aktualnego stanu w ShipX -
-    /// ponowne wysłanie tych samych danych powoduje przygotowanie świeżych ofert.
-    /// </summary>
-    private static JsonObject? BuildResendBody(string shipmentJson)
-    {
-        JsonNode? root;
-        try
-        {
-            root = JsonNode.Parse(shipmentJson);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-
-        if (root is not JsonObject shipment)
-        {
-            return null;
-        }
-
-        var body = new JsonObject();
-        foreach (var propertyName in new[]
-                 {
-                     "receiver", "parcels", "custom_attributes", "service", "reference", "comments",
-                     "insurance", "cod", "additional_services", "external_customer_id"
-                 })
-        {
-            if (shipment.TryGetPropertyValue(propertyName, out var value) && value != null)
-            {
-                body[propertyName] = value.DeepClone();
-            }
-        }
-
-        return body.ContainsKey("receiver") && body.ContainsKey("parcels") ? body : null;
     }
 
     public async Task<InpostShipmentResult> WaitForTrackingNumberAsync(InpostSettings settings, string shipmentId,
         TimeSpan timeout, CancellationToken ct = default)
     {
         var deadline = DateTime.UtcNow + timeout;
+        // W trybie uproszczonym (pole "service") ShipX sam wybiera i opłaca ofertę -
+        // przez pierwsze sekundy nie przeszkadzamy mu własnym zakupem.
+        var buyNotBefore = DateTime.UtcNow + AutoPurchaseGracePeriod;
         var buyAttempts = 0;
         var offersRefreshed = false;
-        string? lastBuyError = null;
+        InpostShipmentResult? failedBuy = null;
         InpostShipmentResult lastResult;
 
         do
@@ -171,34 +120,36 @@ public class InpostShipXClient : IInpostShipXClient
                 return lastResult;
             }
 
-            // ShipX przygotowuje oferty asynchronicznie; dopóki oferta nie zostanie kupiona,
-            // przesyłka nie dostanie numeru listu przewozowego ani etykiety. Statusy bywają
-            // różne w zależności od usługi, więc próbujemy zakupu dla każdego stanu,
-            // z którego przesyłka może jeszcze przejść dalej.
-            if (buyAttempts < MaxBuyAttempts && CanStillBeBought(lastResult.Status) &&
-                lastResult.SelectedOfferId.HasValue)
+            var canBuyNow = DateTime.UtcNow >= buyNotBefore
+                            && buyAttempts < MaxBuyAttempts
+                            && CanStillBeBought(lastResult.Status)
+                            && lastResult.SelectedOfferId.HasValue;
+
+            if (canBuyNow)
             {
                 buyAttempts++;
                 var buyResult = await BuyShipmentOfferAsync(settings, shipmentId, lastResult.SelectedOfferId, ct);
+
                 if (buyResult.Success)
                 {
-                    lastBuyError = null;
+                    failedBuy = null;
                 }
                 else
                 {
-                    lastBuyError = buyResult.ErrorMessage;
+                    failedBuy = buyResult;
 
-                    // Oferty ShipX wygasają - dla starszych przesyłek trzeba poprosić o nowe,
-                    // wysyłając te same dane ponownie, i dopiero wtedy kupować.
-                    if (!offersRefreshed && IsOfferExpired(buyResult.ErrorMessage))
+                    // Problem konta lub usługi InPost - ponawianie niczego nie zmieni.
+                    if (buyResult.ErrorKind == InpostErrorKind.AccountProblem)
+                    {
+                        break;
+                    }
+
+                    // Oferty ShipX wygasają po kilku minutach; pusty PUT generuje nowe.
+                    if (!offersRefreshed && buyResult.ErrorKind == InpostErrorKind.OfferExpired)
                     {
                         offersRefreshed = true;
                         buyAttempts = 0;
-                        var refreshResult = await RefreshOffersAsync(settings, shipmentId, ct);
-                        if (!refreshResult.Success)
-                        {
-                            lastBuyError = refreshResult.ErrorMessage ?? lastBuyError;
-                        }
+                        await RefreshOffersAsync(settings, shipmentId, ct);
                     }
                 }
             }
@@ -206,32 +157,47 @@ public class InpostShipXClient : IInpostShipXClient
             await Task.Delay(TimeSpan.FromSeconds(2), ct);
         } while (DateTime.UtcNow < deadline);
 
-        // Bez numeru listu warto pokazać operatorowi, dlaczego zakup oferty się nie powiódł.
         if (string.IsNullOrEmpty(lastResult.TrackingNumber))
         {
-            if (IsOfferExpired(lastBuyError))
-            {
-                lastBuyError =
-                    "Oferta przewozu InPost wygasła i nie udało się pobrać nowej. " +
-                    "Usuń ten wpis i wygeneruj list przewozowy ponownie.";
-            }
-
-            lastResult.ErrorMessage = lastBuyError ?? (lastResult.SelectedOfferId == null
-                ? $"InPost nie przygotował jeszcze oferty przewozu (status: {lastResult.Status ?? "brak"}). " +
-                  "Użyj przycisku Odśwież za chwilę."
-                : $"Przesyłka czeka na opłacenie oferty (status: {lastResult.Status ?? "brak"}). " +
-                  "Użyj przycisku Odśwież, aby dokończyć zakup.");
+            lastResult.ErrorKind = failedBuy?.ErrorKind ?? InpostErrorKind.Transient;
+            lastResult.ErrorMessage = BuildNotPurchasedMessage(lastResult, failedBuy);
         }
 
         return lastResult;
     }
 
-    private const int MaxBuyAttempts = 3;
+    private const int MaxBuyAttempts = 2;
+    private static readonly TimeSpan AutoPurchaseGracePeriod = TimeSpan.FromSeconds(10);
 
-    private static bool IsOfferExpired(string? errorMessage)
+    /// <summary>
+    /// Komunikat dla operatora budowany ze stanu przesyłki (transakcje, powody niedostępności ofert),
+    /// a nie z surowej treści błędu - dzięki temu wskazuje właściwe miejsce naprawy.
+    /// </summary>
+    private static string BuildNotPurchasedMessage(InpostShipmentResult shipment, InpostShipmentResult? failedBuy)
     {
-        return errorMessage != null &&
-               (errorMessage.Contains("offer_is_not_available") || errorMessage.Contains("offer_expired"));
+        var status = shipment.Status ?? "brak";
+
+        if (!string.IsNullOrWhiteSpace(shipment.OfferUnavailabilityReasons))
+        {
+            return $"InPost nie może zrealizować tej przesyłki: {shipment.OfferUnavailabilityReasons}. " +
+                   "Sprawdź, czy wybrany punkt obsługuje wybraną usługę.";
+        }
+
+        if (shipment.LastTransactionStatus == "failure" ||
+            failedBuy?.ErrorKind == InpostErrorKind.AccountProblem)
+        {
+            return "InPost nie opłacił przesyłki. Sprawdź saldo i dane rozliczeniowe konta InPost " +
+                   "(Menedżer Paczek → Płatności oraz Moje konto → Dane). To nie jest błąd aplikacji. " +
+                   $"Status przesyłki: {status}.";
+        }
+
+        if (failedBuy?.ErrorKind == InpostErrorKind.DataOrCode && !string.IsNullOrWhiteSpace(failedBuy.ErrorMessage))
+        {
+            return failedBuy.ErrorMessage;
+        }
+
+        return $"InPost nie zakończył jeszcze opłacania przesyłki (status: {status}). " +
+               "Użyj przycisku Odśwież za chwilę.";
     }
 
     /// <summary>
@@ -274,6 +240,19 @@ public class InpostShipXClient : IInpostShipXClient
         if (!response.IsSuccessStatusCode)
         {
             var errorBody = await response.Content.ReadAsStringAsync(ct);
+
+            // Najczęstszy przypadek: etykieta powstaje dopiero po opłaceniu przesyłki.
+            if (errorBody.Contains("shipment_status_incorrect"))
+            {
+                var shipment = await GetShipmentAsync(settings, shipmentId, ct);
+                return new InpostLabelResult
+                {
+                    ErrorMessage =
+                        "Etykieta powstaje dopiero po opłaceniu przesyłki przez InPost (status confirmed). " +
+                        $"Obecny status przesyłki: {shipment.Status ?? "nieznany"}."
+                };
+            }
+
             return new InpostLabelResult
             {
                 ErrorMessage = ExtractErrorMessage(errorBody, (int)response.StatusCode)
@@ -288,7 +267,9 @@ public class InpostShipXClient : IInpostShipXClient
     {
         var query = new List<string>
         {
-            "type=parcel_locker",
+            // parcel_locker zwraca także PaczkoPunkty (POP-*/POK-*), których usługa
+            // inpost_locker_standard nie obsługuje - stąd parcel_locker_only.
+            "type=parcel_locker_only",
             "status=Operating",
             $"per_page={Math.Clamp(limit, 1, 100)}"
         };
@@ -326,6 +307,21 @@ public class InpostShipXClient : IInpostShipXClient
         }
     }
 
+    /// <summary>
+    /// PaczkoPunkty i punkty obsługi klienta (POP-*/POK-*) nie realizują usługi Paczkomat®.
+    /// </summary>
+    private static bool IsServicePoint(string? pointName)
+    {
+        if (string.IsNullOrWhiteSpace(pointName))
+        {
+            return false;
+        }
+
+        var name = pointName.Trim().ToUpperInvariant();
+        return name.StartsWith("POP-") || name.StartsWith("POK-") ||
+               name.StartsWith("POP_") || name.StartsWith("POK_");
+    }
+
     private static bool LooksLikePostCode(string phrase) =>
         phrase.Length is 5 or 6 && phrase.Count(char.IsDigit) == 5;
 
@@ -345,7 +341,7 @@ public class InpostShipXClient : IInpostShipXClient
         foreach (var item in items.EnumerateArray())
         {
             var name = GetAsString(item, "name");
-            if (string.IsNullOrWhiteSpace(name))
+            if (string.IsNullOrWhiteSpace(name) || IsServicePoint(name))
             {
                 continue;
             }
@@ -388,6 +384,9 @@ public class InpostShipXClient : IInpostShipXClient
             return $"Nieprawidłowy gabaryt przesyłki: {order.ParcelTemplate}.";
         if (order.ShipmentType == InpostShipmentType.ParcelLocker && string.IsNullOrWhiteSpace(order.TargetPoint))
             return "Dla przesyłki paczkomatowej wymagany jest kod paczkomatu docelowego (target point).";
+        if (order.ShipmentType == InpostShipmentType.ParcelLocker && IsServicePoint(order.TargetPoint))
+            return $"Punkt {order.TargetPoint} to PaczkoPunkt (POP), a nie Paczkomat - " +
+                   "usługa Paczkomat® go nie obsługuje. Wybierz punkt typu Paczkomat.";
         if (order.ShipmentType == InpostShipmentType.Courier &&
             (string.IsNullOrWhiteSpace(order.ReceiverStreet) || string.IsNullOrWhiteSpace(order.ReceiverCity) ||
              string.IsNullOrWhiteSpace(order.ReceiverPostCode)))
@@ -480,6 +479,7 @@ public class InpostShipXClient : IInpostShipXClient
             {
                 Success = false,
                 ErrorMessage = ExtractErrorMessage(responseBody, (int)response.StatusCode),
+                ErrorKind = ClassifyError(responseBody, (int)response.StatusCode),
                 RawJson = responseBody
             };
         }
@@ -488,6 +488,7 @@ public class InpostShipXClient : IInpostShipXClient
         {
             using var doc = JsonDocument.Parse(responseBody);
             var root = doc.RootElement;
+            var buyableOffer = ExtractBuyableOffer(root);
 
             return new InpostShipmentResult
             {
@@ -495,7 +496,10 @@ public class InpostShipXClient : IInpostShipXClient
                 ShipmentId = GetAsString(root, "id"),
                 TrackingNumber = GetAsString(root, "tracking_number"),
                 Status = GetAsString(root, "status"),
-                SelectedOfferId = ExtractSelectedOfferId(root),
+                SelectedOfferId = buyableOffer.offerId,
+                SelectedOfferStatus = buyableOffer.status,
+                OfferUnavailabilityReasons = buyableOffer.unavailabilityReasons,
+                LastTransactionStatus = ExtractLastTransactionStatus(root),
                 RawJson = responseBody
             };
         }
@@ -537,41 +541,123 @@ public class InpostShipXClient : IInpostShipXClient
     }
 
     /// <summary>
-    /// Wyciąga id oferty do zakupu: najpierw ofertę wybraną przez ShipX (selected_offer),
-    /// a gdy jej nie ma - pierwszą dostępną z listy offers.
+    /// Zwraca ofertę, którą ShipX pozwoli kupić - wyłącznie w statusie available/selected.
+    /// Wysłanie do /buy oferty w innym statusie kończy się błędem offer_is_not_available.
     /// </summary>
-    private static long? ExtractSelectedOfferId(JsonElement root)
+    private static (long? offerId, string? status, string? unavailabilityReasons) ExtractBuyableOffer(
+        JsonElement root)
     {
+        string? firstStatus = null;
+        var reasons = new List<string>();
+
         if (root.TryGetProperty("selected_offer", out var selectedOffer) &&
-            selectedOffer.ValueKind == JsonValueKind.Object &&
-            selectedOffer.TryGetProperty("id", out var selectedId) &&
-            selectedId.TryGetInt64(out var selectedOfferId))
+            selectedOffer.ValueKind == JsonValueKind.Object)
         {
-            return selectedOfferId;
+            var status = GetAsString(selectedOffer, "status");
+            firstStatus = status;
+
+            if (IsBuyableStatus(status) &&
+                selectedOffer.TryGetProperty("id", out var selectedId) &&
+                selectedId.TryGetInt64(out var selectedOfferId))
+            {
+                return (selectedOfferId, status, null);
+            }
+
+            CollectUnavailabilityReasons(selectedOffer, reasons);
         }
 
-        if (!root.TryGetProperty("offers", out var offers) || offers.ValueKind != JsonValueKind.Array)
+        if (root.TryGetProperty("offers", out var offers) && offers.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var offer in offers.EnumerateArray())
+            {
+                var status = GetAsString(offer, "status");
+                firstStatus ??= status;
+                CollectUnavailabilityReasons(offer, reasons);
+
+                if (IsBuyableStatus(status) &&
+                    offer.TryGetProperty("id", out var idElement) &&
+                    idElement.TryGetInt64(out var offerId))
+                {
+                    return (offerId, status, null);
+                }
+            }
+        }
+
+        return (null, firstStatus, reasons.Count == 0 ? null : string.Join("; ", reasons.Distinct()));
+    }
+
+    private static bool IsBuyableStatus(string? status) => status is "available" or "selected";
+
+    private static void CollectUnavailabilityReasons(JsonElement offer, List<string> reasons)
+    {
+        if (!offer.TryGetProperty("unavailability_reasons", out var element))
+        {
+            return;
+        }
+
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Array:
+                reasons.AddRange(element.EnumerateArray()
+                    .Select(x => x.ValueKind == JsonValueKind.String ? x.GetString() : x.GetRawText())
+                    .Where(x => !string.IsNullOrWhiteSpace(x))!);
+                break;
+            case JsonValueKind.String:
+                var value = element.GetString();
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    reasons.Add(value);
+                }
+
+                break;
+        }
+    }
+
+    /// <summary>Status ostatniej transakcji rozliczeniowej - "failure" wskazuje na problem z kontem InPost.</summary>
+    private static string? ExtractLastTransactionStatus(JsonElement root)
+    {
+        if (!root.TryGetProperty("transactions", out var transactions) ||
+            transactions.ValueKind != JsonValueKind.Array)
         {
             return null;
         }
 
-        long? firstOfferId = null;
-        foreach (var offer in offers.EnumerateArray())
+        string? lastStatus = null;
+        foreach (var transaction in transactions.EnumerateArray())
         {
-            if (!offer.TryGetProperty("id", out var idElement) || !idElement.TryGetInt64(out var offerId))
+            var status = GetAsString(transaction, "status");
+            if (!string.IsNullOrWhiteSpace(status))
             {
-                continue;
-            }
-
-            firstOfferId ??= offerId;
-
-            if (GetAsString(offer, "status") == "available")
-            {
-                return offerId;
+                lastStatus = status;
             }
         }
 
-        return firstOfferId;
+        return lastStatus;
+    }
+
+    /// <summary>
+    /// Rozpoznaje rodzaj błędu ShipX po kodach w odpowiedzi. ShipX używa różnych kodów
+    /// dla wygasłej oferty (można ponowić) i dla oferty niedostępnej (problem konta/usługi).
+    /// </summary>
+    private static InpostErrorKind ClassifyError(string responseBody, int statusCode)
+    {
+        if (statusCode is 401 or 403)
+        {
+            return InpostErrorKind.DataOrCode;
+        }
+
+        var body = responseBody.ToLowerInvariant();
+
+        if (body.Contains("offer_expired"))
+            return InpostErrorKind.OfferExpired;
+        if (body.Contains("shipment_locked"))
+            return InpostErrorKind.Transient;
+        if (body.Contains("offer_is_not_available") || body.Contains("offer_unavailable") ||
+            body.Contains("transaction_failed") || body.Contains("debt_collection") ||
+            body.Contains("insufficient"))
+            return InpostErrorKind.AccountProblem;
+
+        return statusCode >= 500 ? InpostErrorKind.Transient : InpostErrorKind.DataOrCode;
     }
 
     private static string? GetAsString(JsonElement element, string propertyName)

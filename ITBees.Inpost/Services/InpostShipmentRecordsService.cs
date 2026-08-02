@@ -43,7 +43,7 @@ public class InpostShipmentRecordsService : IInpostShipmentRecordsService
         {
             // Numer listu przewozowego nadawany jest asynchronicznie po zakupie oferty.
             result = _inpostShipXClient
-                .WaitForTrackingNumberAsync(settings, result.ShipmentId, TimeSpan.FromSeconds(20))
+                .WaitForTrackingNumberAsync(settings, result.ShipmentId, TimeSpan.FromSeconds(45))
                 .GetAwaiter().GetResult();
         }
 
@@ -128,7 +128,7 @@ public class InpostShipmentRecordsService : IInpostShipmentRecordsService
             // Odświeżenie dokańcza też przesyłki, które utknęły przed zakupem oferty
             // (np. gdy ShipX przygotowywał oferty dłużej niż trwało tworzenie urządzenia).
             result = _inpostShipXClient
-                .WaitForTrackingNumberAsync(settings, shipment.InpostShipmentId, TimeSpan.FromSeconds(10))
+                .WaitForTrackingNumberAsync(settings, shipment.InpostShipmentId, TimeSpan.FromSeconds(30))
                 .GetAwaiter().GetResult();
         }
 
@@ -162,6 +162,27 @@ public class InpostShipmentRecordsService : IInpostShipmentRecordsService
         }
 
         _shipmentWoRepo.DeleteData(x => x.Id == id);
+    }
+
+    public string GetRawShipmentJson(int id)
+    {
+        var shipment = _shipmentRoRepo.GetData(x => x.Id == id).FirstOrDefault();
+        if (shipment == null)
+        {
+            throw new FasApiErrorException("Nie znaleziono przesyłki o podanym identyfikatorze.", 404);
+        }
+
+        if (string.IsNullOrEmpty(shipment.InpostShipmentId))
+        {
+            throw new FasApiErrorException(
+                "Ta przesyłka nie została utworzona w InPost (brak identyfikatora ShipX).", 400);
+        }
+
+        var settings = GetSettingsOrThrow();
+        var result = _inpostShipXClient.GetShipmentAsync(settings, shipment.InpostShipmentId)
+            .GetAwaiter().GetResult();
+
+        return result.RawJson ?? result.ErrorMessage ?? "";
     }
 
     private InpostSettings GetSettingsOrThrow()

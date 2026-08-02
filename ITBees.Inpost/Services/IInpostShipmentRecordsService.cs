@@ -29,4 +29,10 @@ public interface IInpostShipmentRecordsService
     /// list przewozowy (brak numeru listu). Opłaconych przesyłek nie kasujemy.
     /// </summary>
     void Delete(int id);
+
+    /// <summary>
+    /// Zwraca surową odpowiedź ShipX dla przesyłki (m.in. listę ofert wraz ze statusami
+    /// i terminami ważności) - do diagnostyki problemów z zakupem oferty.
+    /// </summary>
+    string GetRawShipmentJson(int id);
 }
