@@ -16,6 +16,13 @@ public interface IInpostShipXClient
         CancellationToken ct = default);
 
     /// <summary>
+    /// Kupuje wybraną ofertę przewozu. Bez tego kroku przesyłka pozostaje w statusie
+    /// offer_selected - nie dostaje numeru listu przewozowego ani etykiety.
+    /// </summary>
+    Task<InpostShipmentResult> BuyShipmentOfferAsync(InpostSettings settings, string shipmentId,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Czeka (odpytując API) aż przesyłka otrzyma numer listu przewozowego,
     /// maksymalnie przez podany czas. Zwraca ostatni znany stan przesyłki.
     /// </summary>

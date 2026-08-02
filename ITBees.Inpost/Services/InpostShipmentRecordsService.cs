@@ -123,6 +123,15 @@ public class InpostShipmentRecordsService : IInpostShipmentRecordsService
                 result.ErrorMessage ?? "Nie udało się pobrać stanu przesyłki z InPost.", 502);
         }
 
+        if (string.IsNullOrEmpty(result.TrackingNumber))
+        {
+            // Odświeżenie dokańcza też przesyłki, które utknęły przed zakupem oferty
+            // (np. gdy ShipX przygotowywał oferty dłużej niż trwało tworzenie urządzenia).
+            result = _inpostShipXClient
+                .WaitForTrackingNumberAsync(settings, shipment.InpostShipmentId, TimeSpan.FromSeconds(10))
+                .GetAwaiter().GetResult();
+        }
+
         var updated = _shipmentWoRepo.UpdateData(x => x.Id == id, x =>
         {
             x.Status = result.Status;

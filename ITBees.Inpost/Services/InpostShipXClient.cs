@@ -62,10 +62,22 @@ public class InpostShipXClient : IInpostShipXClient
         return await SendAndParseShipmentAsync(request, ct);
     }
 
+    public async Task<InpostShipmentResult> BuyShipmentOfferAsync(InpostSettings settings, string shipmentId,
+        CancellationToken ct = default)
+    {
+        // Pusty obiekt = kup ofertę wybraną przez ShipX (tryb uproszczony z polem "service").
+        var url = $"{settings.BaseUrl.TrimEnd('/')}/v1/shipments/{shipmentId}/buy";
+        using var request = CreateRequest(HttpMethod.Post, url, settings);
+        request.Content = new StringContent("{}", Encoding.UTF8, "application/json");
+
+        return await SendAndParseShipmentAsync(request, ct);
+    }
+
     public async Task<InpostShipmentResult> WaitForTrackingNumberAsync(InpostSettings settings, string shipmentId,
         TimeSpan timeout, CancellationToken ct = default)
     {
         var deadline = DateTime.UtcNow + timeout;
+        var offerBought = false;
         InpostShipmentResult lastResult;
 
         do
@@ -76,10 +88,31 @@ public class InpostShipXClient : IInpostShipXClient
                 return lastResult;
             }
 
+            // ShipX przygotowuje oferty asynchronicznie; dopóki oferta nie zostanie kupiona,
+            // przesyłka nie dostanie numeru listu przewozowego ani etykiety.
+            if (!offerBought && IsAwaitingPurchase(lastResult.Status))
+            {
+                var buyResult = await BuyShipmentOfferAsync(settings, shipmentId, ct);
+                offerBought = buyResult.Success;
+                if (!buyResult.Success)
+                {
+                    lastResult.ErrorMessage = buyResult.ErrorMessage;
+                }
+            }
+
             await Task.Delay(TimeSpan.FromSeconds(2), ct);
         } while (DateTime.UtcNow < deadline);
 
         return lastResult;
+    }
+
+    /// <summary>
+    /// Statusy ShipX, w których przesyłka czeka na zakup oferty
+    /// (po nim nadawany jest numer listu przewozowego i udostępniana etykieta).
+    /// </summary>
+    private static bool IsAwaitingPurchase(string? status)
+    {
+        return status is "offer_selected" or "offers_prepared";
     }
 
     public async Task<byte[]?> GetLabelAsync(InpostSettings settings, string shipmentId,
