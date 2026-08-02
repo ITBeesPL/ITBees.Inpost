@@ -146,6 +146,24 @@ public class InpostShipmentRecordsService : IInpostShipmentRecordsService
         return new InpostShipmentRecordVm(updated);
     }
 
+    public void Delete(int id)
+    {
+        var shipment = _shipmentRoRepo.GetData(x => x.Id == id).FirstOrDefault();
+        if (shipment == null)
+        {
+            throw new FasApiErrorException("Nie znaleziono przesyłki o podanym identyfikatorze.", 404);
+        }
+
+        if (!string.IsNullOrWhiteSpace(shipment.TrackingNumber))
+        {
+            throw new FasApiErrorException(
+                $"Przesyłka ma już nadany numer listu przewozowego ({shipment.TrackingNumber}) - " +
+                "nie można usunąć jej z historii. Anuluj ją najpierw w Menedżerze Paczek InPost.", 400);
+        }
+
+        _shipmentWoRepo.DeleteData(x => x.Id == id);
+    }
+
     private InpostSettings GetSettingsOrThrow()
     {
         var settings = _inpostIntegrationSettingsService.GetShipXSettingsOrNull();

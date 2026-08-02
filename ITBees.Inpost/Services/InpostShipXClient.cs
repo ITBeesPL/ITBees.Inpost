@@ -63,12 +63,28 @@ public class InpostShipXClient : IInpostShipXClient
     }
 
     public async Task<InpostShipmentResult> BuyShipmentOfferAsync(InpostSettings settings, string shipmentId,
-        CancellationToken ct = default)
+        long? offerId = null, CancellationToken ct = default)
     {
-        // Pusty obiekt = kup ofertę wybraną przez ShipX (tryb uproszczony z polem "service").
+        // ShipX wymaga wskazania oferty (offer_id) - bez tego zwraca błąd walidacji.
+        if (offerId == null)
+        {
+            var shipment = await GetShipmentAsync(settings, shipmentId, ct);
+            offerId = shipment.SelectedOfferId;
+
+            if (offerId == null)
+            {
+                return new InpostShipmentResult
+                {
+                    Success = false,
+                    ErrorMessage = "InPost nie przygotował jeszcze oferty przewozu dla tej przesyłki.",
+                    Status = shipment.Status
+                };
+            }
+        }
+
         var url = $"{settings.BaseUrl.TrimEnd('/')}/v1/shipments/{shipmentId}/buy";
         using var request = CreateRequest(HttpMethod.Post, url, settings);
-        request.Content = new StringContent("{}", Encoding.UTF8, "application/json");
+        request.Content = new StringContent($"{{\"offer_id\":{offerId}}}", Encoding.UTF8, "application/json");
 
         return await SendAndParseShipmentAsync(request, ct);
     }
@@ -93,10 +109,11 @@ public class InpostShipXClient : IInpostShipXClient
             // przesyłka nie dostanie numeru listu przewozowego ani etykiety. Statusy bywają
             // różne w zależności od usługi, więc próbujemy zakupu dla każdego stanu,
             // z którego przesyłka może jeszcze przejść dalej.
-            if (buyAttempts < MaxBuyAttempts && CanStillBeBought(lastResult.Status))
+            if (buyAttempts < MaxBuyAttempts && CanStillBeBought(lastResult.Status) &&
+                lastResult.SelectedOfferId.HasValue)
             {
                 buyAttempts++;
-                var buyResult = await BuyShipmentOfferAsync(settings, shipmentId, ct);
+                var buyResult = await BuyShipmentOfferAsync(settings, shipmentId, lastResult.SelectedOfferId, ct);
                 if (buyResult.Success)
                 {
                     lastBuyError = null;
@@ -111,9 +128,13 @@ public class InpostShipXClient : IInpostShipXClient
         } while (DateTime.UtcNow < deadline);
 
         // Bez numeru listu warto pokazać operatorowi, dlaczego zakup oferty się nie powiódł.
-        if (string.IsNullOrEmpty(lastResult.TrackingNumber) && !string.IsNullOrEmpty(lastBuyError))
+        if (string.IsNullOrEmpty(lastResult.TrackingNumber))
         {
-            lastResult.ErrorMessage = lastBuyError;
+            lastResult.ErrorMessage = lastBuyError ?? (lastResult.SelectedOfferId == null
+                ? $"InPost nie przygotował jeszcze oferty przewozu (status: {lastResult.Status ?? "brak"}). " +
+                  "Użyj przycisku Odśwież za chwilę."
+                : $"Przesyłka czeka na opłacenie oferty (status: {lastResult.Status ?? "brak"}). " +
+                  "Użyj przycisku Odśwież, aby dokończyć zakup.");
         }
 
         return lastResult;
@@ -382,6 +403,7 @@ public class InpostShipXClient : IInpostShipXClient
                 ShipmentId = GetAsString(root, "id"),
                 TrackingNumber = GetAsString(root, "tracking_number"),
                 Status = GetAsString(root, "status"),
+                SelectedOfferId = ExtractSelectedOfferId(root),
                 RawJson = responseBody
             };
         }
@@ -420,6 +442,44 @@ public class InpostShipXClient : IInpostShipXClient
         }
 
         return $"InPost API zwróciło błąd HTTP {statusCode}.";
+    }
+
+    /// <summary>
+    /// Wyciąga id oferty do zakupu: najpierw ofertę wybraną przez ShipX (selected_offer),
+    /// a gdy jej nie ma - pierwszą dostępną z listy offers.
+    /// </summary>
+    private static long? ExtractSelectedOfferId(JsonElement root)
+    {
+        if (root.TryGetProperty("selected_offer", out var selectedOffer) &&
+            selectedOffer.ValueKind == JsonValueKind.Object &&
+            selectedOffer.TryGetProperty("id", out var selectedId) &&
+            selectedId.TryGetInt64(out var selectedOfferId))
+        {
+            return selectedOfferId;
+        }
+
+        if (!root.TryGetProperty("offers", out var offers) || offers.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        long? firstOfferId = null;
+        foreach (var offer in offers.EnumerateArray())
+        {
+            if (!offer.TryGetProperty("id", out var idElement) || !idElement.TryGetInt64(out var offerId))
+            {
+                continue;
+            }
+
+            firstOfferId ??= offerId;
+
+            if (GetAsString(offer, "status") == "available")
+            {
+                return offerId;
+            }
+        }
+
+        return firstOfferId;
     }
 
     private static string? GetAsString(JsonElement element, string propertyName)

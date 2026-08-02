@@ -13,6 +13,9 @@ public class InpostShipmentResult
     /// <summary>Status przesyłki w ShipX (np. created, confirmed, offer_selected).</summary>
     public string? Status { get; set; }
 
+    /// <summary>Identyfikator oferty wybranej przez ShipX - wymagany przy zakupie przesyłki.</summary>
+    public long? SelectedOfferId { get; set; }
+
     public string? ErrorMessage { get; set; }
 
     /// <summary>Pełna odpowiedź API (do diagnostyki).</summary>

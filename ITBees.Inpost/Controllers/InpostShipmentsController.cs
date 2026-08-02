@@ -29,4 +29,14 @@ public class InpostShipmentsController : RestfulControllerBase<InpostShipmentsCo
         return ReturnOkResult(() =>
             _inpostShipmentRecordsService.GetPaginated(search, page, pageSize, sortColumn, sortOrder));
     }
+
+    [HttpDelete]
+    public IActionResult Delete(int id)
+    {
+        return ReturnOkResult(() =>
+        {
+            _inpostShipmentRecordsService.Delete(id);
+            return new { message = "Wpis przesyłki został usunięty." };
+        });
+    }
 }

@@ -20,7 +20,7 @@ public interface IInpostShipXClient
     /// offer_selected - nie dostaje numeru listu przewozowego ani etykiety.
     /// </summary>
     Task<InpostShipmentResult> BuyShipmentOfferAsync(InpostSettings settings, string shipmentId,
-        CancellationToken ct = default);
+        long? offerId = null, CancellationToken ct = default);
 
     /// <summary>
     /// Czeka (odpytując API) aż przesyłka otrzyma numer listu przewozowego,

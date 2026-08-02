@@ -23,4 +23,10 @@ public interface IInpostShipmentRecordsService
 
     /// <summary>Odpytuje ShipX o aktualny stan przesyłki, zapisuje go i zwraca zaktualizowany rekord.</summary>
     InpostShipmentRecordVm RefreshStatus(int id);
+
+    /// <summary>
+    /// Usuwa z historii nieudany wpis przesyłki - tylko taki, dla którego nie powstał
+    /// list przewozowy (brak numeru listu). Opłaconych przesyłek nie kasujemy.
+    /// </summary>
+    void Delete(int id);
 }
