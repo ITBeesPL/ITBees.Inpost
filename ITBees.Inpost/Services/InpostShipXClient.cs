@@ -313,12 +313,16 @@ public class InpostShipXClient : IInpostShipXClient
             // Najczęstszy przypadek: etykieta powstaje dopiero po opłaceniu przesyłki.
             if (errorBody.Contains("shipment_status_incorrect"))
             {
+                // Sam status nic operatorowi nie mówi - dokładamy powód, dla którego ShipX nie opłacił
+                // przesyłki (np. odrzucona transakcja przy braku środków), odczytany z jej stanu.
                 var shipment = await GetShipmentAsync(settings, shipmentId, ct);
+                var reason = shipment.Success ? BuildNotPurchasedMessage(shipment, null) : null;
                 return new InpostLabelResult
                 {
                     ErrorMessage =
                         "Etykieta powstaje dopiero po opłaceniu przesyłki przez InPost (status confirmed). " +
-                        $"Obecny status przesyłki: {shipment.Status ?? "nieznany"}."
+                        $"Obecny status przesyłki: {shipment.Status ?? "nieznany"}." +
+                        (string.IsNullOrWhiteSpace(reason) ? "" : $" {reason}")
                 };
             }
 
