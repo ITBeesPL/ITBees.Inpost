@@ -36,6 +36,12 @@ public class InpostShipmentResult
 
     public string? ErrorMessage { get; set; }
 
+    /// <summary>
+    /// Usługa ShipX użyta przy tworzeniu przesyłki (np. inpost_locker_standard,
+    /// inpost_courier_c2c) - dla kuriera zależy od tego, czy organizacja ma umowę kurierską.
+    /// </summary>
+    public string? Service { get; set; }
+
     /// <summary>Pełna odpowiedź API (do diagnostyki).</summary>
     public string? RawJson { get; set; }
 }

@@ -1,3 +1,5 @@
+using ITBees.Inpost.Models;
+
 namespace ITBees.Inpost;
 
 public class InpostSettings
@@ -20,4 +22,10 @@ public class InpostSettings
     /// Identyfikator organizacji w ShipX - wymagany do tworzenia przesyłek.
     /// </summary>
     public string OrganizationId { get; set; } = "";
+
+    /// <summary>
+    /// Która usługa kurierska ma być użyta. Domyślne <see cref="InpostCourierServiceMode.Auto"/>
+    /// samo rozpoznaje konto bez umowy kurierskiej i nadaje przesyłkę usługą C2C.
+    /// </summary>
+    public InpostCourierServiceMode CourierServiceMode { get; set; } = InpostCourierServiceMode.Auto;
 }

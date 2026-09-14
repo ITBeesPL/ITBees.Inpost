@@ -15,6 +15,9 @@ public class InpostShipXClient : IInpostShipXClient
 {
     public const string HttpClientName = "InpostShipX";
 
+    /// <summary>Kod ShipX oznaczający, że organizacja nie ma podpisanej umowy kurierskiej.</summary>
+    private const string MissingCourierContractError = "trucker_ID_is_not_set_for_organization";
+
     private readonly IHttpClientFactory _httpClientFactory;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -44,14 +47,53 @@ public class InpostShipXClient : IInpostShipXClient
             return new InpostShipmentResult { Success = false, ErrorMessage = validationError };
         }
 
-        var body = BuildCreateShipmentBody(order);
+        if (order.ShipmentType == InpostShipmentType.ParcelLocker)
+        {
+            return await PostShipmentAsync(settings, order, InpostCourierServices.LockerStandard, ct);
+        }
+
+        if (settings.CourierServiceMode == InpostCourierServiceMode.C2C)
+        {
+            return await PostShipmentAsync(settings, order, InpostCourierServices.C2C, ct);
+        }
+
+        var result = await PostShipmentAsync(settings, order, InpostCourierServices.Standard, ct);
+
+        // Konto przedpłacone nie ma umowy kurierskiej, więc usługa z umową jest dla niego
+        // niedostępna - jedyną możliwością jest kurier C2C. ShipX odrzuca takie żądanie
+        // kodem 400, czyli przesyłka nie powstała i ponowienie niczego nie duplikuje.
+        if (settings.CourierServiceMode == InpostCourierServiceMode.Auto &&
+            !result.Success && IsMissingCourierContract(result))
+        {
+            return await PostShipmentAsync(settings, order, InpostCourierServices.C2C, ct);
+        }
+
+        return result;
+    }
+
+    private async Task<InpostShipmentResult> PostShipmentAsync(InpostSettings settings, CreateShipmentOrder order,
+        string service, CancellationToken ct)
+    {
+        var body = BuildCreateShipmentBody(order, service);
         var url = $"{settings.BaseUrl.TrimEnd('/')}/v1/organizations/{settings.OrganizationId}/shipments";
 
         using var request = CreateRequest(HttpMethod.Post, url, settings);
         request.Content = new StringContent(JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8,
             "application/json");
 
-        return await SendAndParseShipmentAsync(request, ct);
+        var result = await SendAndParseShipmentAsync(request, ct);
+        result.Service = service;
+        return result;
+    }
+
+    /// <summary>
+    /// Rozpoznaje odmowę ShipX z powodu braku umowy kurierskiej
+    /// (<c>trucker_ID_is_not_set_for_organization</c>).
+    /// </summary>
+    private static bool IsMissingCourierContract(InpostShipmentResult result)
+    {
+        return (result.RawJson ?? result.ErrorMessage ?? "")
+            .Contains(MissingCourierContractError, StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<InpostShipmentResult> GetShipmentAsync(InpostSettings settings, string shipmentId,
@@ -422,7 +464,7 @@ public class InpostShipXClient : IInpostShipXClient
         return null;
     }
 
-    private static Dictionary<string, object?> BuildCreateShipmentBody(CreateShipmentOrder order)
+    private static Dictionary<string, object?> BuildCreateShipmentBody(CreateShipmentOrder order, string service)
     {
         var receiver = new Dictionary<string, object?>
         {
@@ -449,9 +491,7 @@ public class InpostShipXClient : IInpostShipXClient
         {
             ["receiver"] = receiver,
             ["parcels"] = new object[] { new Dictionary<string, object?> { ["template"] = order.ParcelTemplate } },
-            ["service"] = order.ShipmentType == InpostShipmentType.ParcelLocker
-                ? "inpost_locker_standard"
-                : "inpost_courier_standard",
+            ["service"] = service,
             ["reference"] = EmptyToNull(order.Reference),
             ["comments"] = EmptyToNull(order.Comments)
         };
@@ -551,7 +591,16 @@ public class InpostShipXClient : IInpostShipXClient
             var root = doc.RootElement;
 
             var message = GetAsString(root, "message") ?? GetAsString(root, "error");
-            if (root.TryGetProperty("details", out var details))
+
+            var known = TranslateKnownError(message);
+            if (known != null)
+            {
+                return known;
+            }
+
+            // details bywa JSON-owym nullem - doklejenie go dawało komunikaty kończące się słowem "null".
+            if (root.TryGetProperty("details", out var details) && details.ValueKind
+                    is not (JsonValueKind.Null or JsonValueKind.Undefined))
             {
                 message = $"{message} {details.GetRawText()}".Trim();
             }
@@ -567,6 +616,28 @@ public class InpostShipXClient : IInpostShipXClient
         }
 
         return $"InPost API zwróciło błąd HTTP {statusCode}.";
+    }
+
+    /// <summary>
+    /// Zamienia kody ShipX, które nic nie mówią operatorowi, na wyjaśnienie z podpowiedzią,
+    /// co zrobić. Zwraca null dla kodów nieznanych - te pokazujemy tak, jak przyszły.
+    /// </summary>
+    private static string? TranslateKnownError(string? errorCode)
+    {
+        if (string.IsNullOrWhiteSpace(errorCode))
+        {
+            return null;
+        }
+
+        if (errorCode.Contains(MissingCourierContractError, StringComparison.OrdinalIgnoreCase))
+        {
+            return "Konto InPost nie ma podpisanej umowy kurierskiej, więc usługa Kurier InPost " +
+                   "jest dla niego niedostępna. Konta przedpłacone nadają przesyłki kurierskie " +
+                   "usługą Kurier C2C - upewnij się, że na koncie w Menedżerze Paczek są środki, " +
+                   "albo podpisz z InPostem umowę kurierską.";
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -688,9 +759,11 @@ public class InpostShipXClient : IInpostShipXClient
 
         var body = responseBody.ToLowerInvariant();
 
-        // Rozliczenia - ponawianie nic nie da, trzeba naprawić konto w Menedżerze Paczek.
+        // Rozliczenia i zakres usług - ponawianie nic nie da, trzeba naprawić konto
+        // w Menedżerze Paczek (brak umowy kurierskiej to też cecha konta, nie danych przesyłki).
         if (body.Contains("transaction_failed") || body.Contains("debt_collection") ||
-            body.Contains("insufficient") || body.Contains("payment"))
+            body.Contains("insufficient") || body.Contains("payment") ||
+            body.Contains(MissingCourierContractError.ToLowerInvariant()))
             return InpostErrorKind.AccountProblem;
 
         // offer_is_not_available znaczy tylko tyle, że oferta nie jest w statusie available/selected -
