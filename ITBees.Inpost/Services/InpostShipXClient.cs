@@ -460,6 +460,8 @@ public class InpostShipXClient : IInpostShipXClient
             (string.IsNullOrWhiteSpace(order.ReceiverStreet) || string.IsNullOrWhiteSpace(order.ReceiverCity) ||
              string.IsNullOrWhiteSpace(order.ReceiverPostCode)))
             return "Dla przesyłki kurierskiej wymagany jest pełny adres odbiorcy (ulica, miasto, kod pocztowy).";
+        if (order.SendingMethod != null && !InpostSendingMethods.IsKnown(order.SendingMethod))
+            return $"Nieprawidłowy sposób nadania przesyłki: {order.SendingMethod}.";
 
         return null;
     }
@@ -496,14 +498,19 @@ public class InpostShipXClient : IInpostShipXClient
             ["comments"] = EmptyToNull(order.Comments)
         };
 
+        // sending_method jest wymagane także dla kuriera C2C - jego brak kończy się
+        // błędem walidacji {"custom_attributes":[{"sending_method":["required"]}]}.
+        var customAttributes = new Dictionary<string, object?>
+        {
+            ["sending_method"] = order.SendingMethod ?? InpostSendingMethods.DefaultFor(order.ShipmentType)
+        };
+
         if (order.ShipmentType == InpostShipmentType.ParcelLocker)
         {
-            body["custom_attributes"] = new Dictionary<string, object?>
-            {
-                ["target_point"] = order.TargetPoint,
-                ["sending_method"] = order.SendingMethod
-            };
+            customAttributes["target_point"] = order.TargetPoint;
         }
+
+        body["custom_attributes"] = customAttributes;
 
         return body;
     }

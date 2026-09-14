@@ -36,8 +36,9 @@ public class CreateShipmentOrder
     public string? Comments { get; set; }
 
     /// <summary>
-    /// Sposób nadania przesyłki paczkomatowej:
-    /// parcel_locker (nadanie w paczkomacie) lub dispatch_order (odbiór przez kuriera).
+    /// Sposób nadania przesyłki - patrz <see cref="InpostSendingMethods"/>. ShipX wymaga go
+    /// dla przesyłek paczkomatowych i dla kuriera C2C. Null oznacza wartość domyślną dla
+    /// danego typu przesyłki: Paczkomat dla paczkomatowej, odbiór przez kuriera dla kurierskiej.
     /// </summary>
-    public string SendingMethod { get; set; } = "parcel_locker";
+    public string? SendingMethod { get; set; }
 }
