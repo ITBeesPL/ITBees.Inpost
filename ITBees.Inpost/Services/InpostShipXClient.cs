@@ -146,11 +146,9 @@ public class InpostShipXClient : IInpostShipXClient
         TimeSpan timeout, CancellationToken ct = default)
     {
         var deadline = DateTime.UtcNow + timeout;
-        // W trybie uproszczonym (pole "service") ShipX sam wybiera i opłaca ofertę -
-        // przez pierwsze sekundy nie przeszkadzamy mu własnym zakupem.
-        var buyNotBefore = DateTime.UtcNow + AutoPurchaseGracePeriod;
         var buyAttempts = 0;
         var offersRefreshed = 0;
+        DateTime? buyNotBefore = null;
         InpostShipmentResult? failedBuy = null;
         InpostShipmentResult lastResult;
 
@@ -162,47 +160,82 @@ public class InpostShipXClient : IInpostShipXClient
                 return lastResult;
             }
 
-            var canBuyNow = DateTime.UtcNow >= buyNotBefore
-                            && buyAttempts < MaxBuyAttempts
-                            && CanStillBeBought(lastResult.Status)
-                            && lastResult.SelectedOfferId.HasValue;
-
-            if (canBuyNow)
+            if (!CanStillBeBought(lastResult.Status))
             {
-                buyAttempts++;
-                var buyResult = await BuyShipmentOfferAsync(settings, shipmentId, lastResult.SelectedOfferId, ct);
+                // Opłacona albo zamknięta - numer listu przyjdzie sam albo wcale, kupować nie ma czego.
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+                continue;
+            }
 
-                if (buyResult.Success)
+            // W trybie uproszczonym (pole "service") ShipX sam wybiera i opłaca ofertę - świeżo
+            // utworzonej przesyłce dajemy chwilę, zanim wejdziemy mu w drogę własnym zakupem.
+            // Jeśli w przesyłce jest już jakakolwiek transakcja, ShipX swoją próbę ma za sobą.
+            buyNotBefore ??= lastResult.LastTransactionStatus == null
+                ? DateTime.UtcNow + AutoPurchaseGracePeriod
+                : DateTime.UtcNow;
+
+            if (DateTime.UtcNow < buyNotBefore)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+                continue;
+            }
+
+            if (!lastResult.SelectedOfferId.HasValue)
+            {
+                // Nie ma czego kupić. Oferty ShipX żyją kilka minut, więc przesyłka, której płatność
+                // odrzucono (np. puste konto), po doładowaniu ma już tylko wygasłe oferty. Pusty PUT
+                // generuje nowe - bez tego odświeżanie czekałoby do końca limitu i nic nie zmieniło.
+                if (offersRefreshed < MaxOfferRefreshes)
                 {
-                    failedBuy = null;
+                    offersRefreshed++;
+                    buyAttempts = 0;
+                    await RefreshOffersAsync(settings, shipmentId, ct);
                 }
-                else
+
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+                continue;
+            }
+
+            if (buyAttempts >= MaxBuyAttempts)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+                continue;
+            }
+
+            buyAttempts++;
+            var transactionBeforeBuy = lastResult.LastTransactionKey;
+            var buyResult = await BuyShipmentOfferAsync(settings, shipmentId, lastResult.SelectedOfferId, ct);
+
+            if (buyResult.Success)
+            {
+                failedBuy = null;
+            }
+            else
+            {
+                failedBuy = buyResult;
+
+                // O przyczynie rozstrzyga transakcja rozliczeniowa ShipX, a nie treść błędu z /buy:
+                // przy zaległościach (debt_collection) /buy zwraca mylące offer_is_not_available.
+                // Liczy się wyłącznie transakcja nowsza niż sprzed tego zakupu - stara odmowa
+                // z czasów pustego konta nie może blokować przesyłki po doładowaniu.
+                var afterBuy = await GetShipmentAsync(settings, shipmentId, ct);
+                var newFailedTransaction = afterBuy.LastTransactionStatus == "failure" &&
+                                           afterBuy.LastTransactionKey != transactionBeforeBuy;
+
+                if (newFailedTransaction || buyResult.ErrorKind == InpostErrorKind.AccountProblem)
                 {
-                    failedBuy = buyResult;
-
-                    // O przyczynie rozstrzyga transakcja rozliczeniowa ShipX, a nie treść błędu z /buy:
-                    // przy zaległościach (debt_collection) /buy zwraca mylące offer_is_not_available.
-                    var afterBuy = await GetShipmentAsync(settings, shipmentId, ct);
-                    if (afterBuy.LastTransactionStatus == "failure")
-                    {
-                        lastResult = afterBuy;
-                        failedBuy.ErrorKind = InpostErrorKind.AccountProblem;
-                        break;
-                    }
-
                     // Problem konta lub usługi InPost - ponawianie niczego nie zmieni.
-                    if (buyResult.ErrorKind == InpostErrorKind.AccountProblem)
-                    {
-                        break;
-                    }
+                    lastResult = afterBuy;
+                    failedBuy.ErrorKind = InpostErrorKind.AccountProblem;
+                    break;
+                }
 
-                    // Oferty ShipX wygasają po kilku minutach; pusty PUT generuje nowe.
-                    if (offersRefreshed < MaxOfferRefreshes && buyResult.ErrorKind == InpostErrorKind.OfferExpired)
-                    {
-                        offersRefreshed++;
-                        buyAttempts = 0;
-                        await RefreshOffersAsync(settings, shipmentId, ct);
-                    }
+                // Oferta wygasła albo jest niedostępna; pusty PUT generuje nowe.
+                if (offersRefreshed < MaxOfferRefreshes && buyResult.ErrorKind == InpostErrorKind.OfferExpired)
+                {
+                    offersRefreshed++;
+                    buyAttempts = 0;
+                    await RefreshOffersAsync(settings, shipmentId, ct);
                 }
             }
 
@@ -212,7 +245,8 @@ public class InpostShipXClient : IInpostShipXClient
         if (string.IsNullOrEmpty(lastResult.TrackingNumber))
         {
             lastResult.ErrorKind = failedBuy?.ErrorKind ?? InpostErrorKind.Transient;
-            lastResult.ErrorMessage = BuildNotPurchasedMessage(lastResult, failedBuy);
+            lastResult.ErrorMessage = BuildNotPurchasedMessage(lastResult, failedBuy,
+                trustTransactionFailure: failedBuy?.ErrorKind == InpostErrorKind.AccountProblem);
         }
 
         return lastResult;
@@ -226,7 +260,8 @@ public class InpostShipXClient : IInpostShipXClient
     /// Komunikat dla operatora budowany ze stanu przesyłki (transakcje, powody niedostępności ofert),
     /// a nie z surowej treści błędu - dzięki temu wskazuje właściwe miejsce naprawy.
     /// </summary>
-    private static string BuildNotPurchasedMessage(InpostShipmentResult shipment, InpostShipmentResult? failedBuy)
+    private static string BuildNotPurchasedMessage(InpostShipmentResult shipment, InpostShipmentResult? failedBuy,
+        bool trustTransactionFailure)
     {
         var status = shipment.Status ?? "brak";
 
@@ -236,8 +271,10 @@ public class InpostShipXClient : IInpostShipXClient
                    "Sprawdź, czy wybrany punkt obsługuje wybraną usługę.";
         }
 
-        if (shipment.LastTransactionStatus == "failure" ||
-            failedBuy?.ErrorKind == InpostErrorKind.AccountProblem)
+        // Odrzuconą transakcję cytujemy tylko wtedy, gdy jest aktualna (nowa odmowa z tej próby albo
+        // migawka stanu bez naszej próby zakupu). Stara odmowa sprzed doładowania konta nic nie mówi.
+        if (trustTransactionFailure &&
+            (shipment.LastTransactionStatus == "failure" || failedBuy?.ErrorKind == InpostErrorKind.AccountProblem))
         {
             var reason = shipment.LastTransactionError switch
             {
@@ -263,6 +300,15 @@ public class InpostShipXClient : IInpostShipXClient
                    $"(status przesyłki: {status}, status oferty: {offerStatus}). " +
                    "Jeśli powtórne Odśwież nie pomoże, sprawdź saldo i dane rozliczeniowe konta InPost " +
                    "w Menedżerze Paczek, albo utwórz list przewozowy ponownie.";
+        }
+
+        if (failedBuy == null && !shipment.SelectedOfferId.HasValue &&
+            !string.IsNullOrWhiteSpace(shipment.SelectedOfferStatus))
+        {
+            return "InPost nie udostępnił oferty, którą dałoby się opłacić " +
+                   $"(status przesyłki: {status}, status oferty: {shipment.SelectedOfferStatus}). " +
+                   "Użyj przycisku Odśwież; jeśli to nie pomoże, sprawdź w Menedżerze Paczek, " +
+                   "czy usługa jest dostępna dla tego konta.";
         }
 
         return $"InPost nie zakończył jeszcze opłacania przesyłki (status: {status}). " +
@@ -316,7 +362,9 @@ public class InpostShipXClient : IInpostShipXClient
                 // Sam status nic operatorowi nie mówi - dokładamy powód, dla którego ShipX nie opłacił
                 // przesyłki (np. odrzucona transakcja przy braku środków), odczytany z jej stanu.
                 var shipment = await GetShipmentAsync(settings, shipmentId, ct);
-                var reason = shipment.Success ? BuildNotPurchasedMessage(shipment, null) : null;
+                var reason = shipment.Success
+                    ? BuildNotPurchasedMessage(shipment, null, trustTransactionFailure: true)
+                    : null;
                 return new InpostLabelResult
                 {
                     ErrorMessage =
@@ -580,6 +628,7 @@ public class InpostShipXClient : IInpostShipXClient
                 OfferUnavailabilityReasons = buyableOffer.unavailabilityReasons,
                 LastTransactionStatus = lastTransaction.status,
                 LastTransactionError = lastTransaction.error,
+                LastTransactionKey = lastTransaction.key,
                 RawJson = responseBody
             };
         }
@@ -728,16 +777,17 @@ public class InpostShipXClient : IInpostShipXClient
     /// Stan ostatniej transakcji rozliczeniowej ShipX. To ona rozstrzyga, czy przesyłka nie została
     /// opłacona z powodu konta (np. debt_collection = zaległości/brak środków).
     /// </summary>
-    private static (string? status, string? error) ExtractLastTransaction(JsonElement root)
+    private static (string? status, string? error, string? key) ExtractLastTransaction(JsonElement root)
     {
         if (!root.TryGetProperty("transactions", out var transactions) ||
             transactions.ValueKind != JsonValueKind.Array)
         {
-            return (null, null);
+            return (null, null, null);
         }
 
         string? lastStatus = null;
         string? lastError = null;
+        string? lastKey = null;
 
         foreach (var transaction in transactions.EnumerateArray())
         {
@@ -748,13 +798,16 @@ public class InpostShipXClient : IInpostShipXClient
             }
 
             lastStatus = status;
+            lastKey = transaction.TryGetProperty("id", out var id) && id.ValueKind != JsonValueKind.Null
+                ? id.GetRawText()
+                : GetAsString(transaction, "created_at");
             lastError = transaction.TryGetProperty("details", out var details) &&
                         details.ValueKind == JsonValueKind.Object
                 ? GetAsString(details, "error") ?? GetAsString(details, "message")
                 : null;
         }
 
-        return (lastStatus, lastError);
+        return (lastStatus, lastError, lastKey);
     }
 
     /// <summary>

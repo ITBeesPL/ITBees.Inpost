@@ -31,6 +31,12 @@ public class InpostShipmentResult
     /// <summary>Kod błędu rozliczenia z ShipX, np. debt_collection (zaległości / brak środków).</summary>
     public string? LastTransactionError { get; set; }
 
+    /// <summary>
+    /// Klucz ostatniej transakcji (id, a gdy go brak - created_at). Pozwala odróżnić nową odmowę
+    /// płatności od starej, sprzed doładowania konta.
+    /// </summary>
+    public string? LastTransactionKey { get; set; }
+
     /// <summary>Rodzaj problemu - decyduje, czy ponawiać próbę i co pokazać operatorowi.</summary>
     public InpostErrorKind ErrorKind { get; set; } = InpostErrorKind.None;
 
