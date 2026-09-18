@@ -1,3 +1,4 @@
+using ITBees.Inpost.Models;
 using ITBees.Inpost.Services;
 using ITBees.RestfulApiControllers;
 using Microsoft.AspNetCore.Authorization;
@@ -7,24 +8,30 @@ using Microsoft.Extensions.Logging;
 namespace ITBees.Inpost.Controllers;
 
 /// <summary>
-/// Pobieranie etykiety (listu przewozowego) PDF dla przesyłki utworzonej w ShipX.
+/// Pobieranie etykiety (listu przewozowego) PDF dla przesyłki utworzonej w ShipX. Parametr
+/// <c>type</c> wybiera typ etykiety (<see cref="InpostLabelTypes"/>): bez niego strona A4,
+/// <c>type=A6</c> - pojedyncza etykieta 105 × 148 mm dla drukarki etykiet.
+/// Etykiety doręczonej przesyłki nie wydaje (409 z powodem w <c>message</c>).
 /// </summary>
 [Authorize(Roles = "PlatformOperator")]
 public class InpostShipmentLabelController : RestfulControllerBase<InpostShipmentLabelController>
 {
     private readonly IInpostIntegrationSettingsService _inpostIntegrationSettingsService;
     private readonly IInpostShipXClient _inpostShipXClient;
+    private readonly IInpostDeliveryTrackingService _inpostDeliveryTrackingService;
 
     public InpostShipmentLabelController(ILogger<InpostShipmentLabelController> logger,
         IInpostIntegrationSettingsService inpostIntegrationSettingsService,
-        IInpostShipXClient inpostShipXClient) : base(logger)
+        IInpostShipXClient inpostShipXClient,
+        IInpostDeliveryTrackingService inpostDeliveryTrackingService) : base(logger)
     {
         _inpostIntegrationSettingsService = inpostIntegrationSettingsService;
         _inpostShipXClient = inpostShipXClient;
+        _inpostDeliveryTrackingService = inpostDeliveryTrackingService;
     }
 
     [HttpGet]
-    public async Task<IActionResult> Get(string shipmentId)
+    public async Task<IActionResult> Get(string shipmentId, string? type = null)
     {
         var settings = _inpostIntegrationSettingsService.GetShipXSettingsOrNull();
         if (settings == null)
@@ -32,7 +39,14 @@ public class InpostShipmentLabelController : RestfulControllerBase<InpostShipmen
             return BadRequest(new { message = "Integracja z InPost nie jest skonfigurowana." });
         }
 
-        var label = await _inpostShipXClient.GetLabelWithDetailsAsync(settings, shipmentId);
+        var blockReason = await _inpostDeliveryTrackingService.GetLabelBlockReasonAsync(shipmentId);
+        if (blockReason != null)
+        {
+            return Conflict(new { message = blockReason });
+        }
+
+        var labelType = InpostLabelTypes.Normalize(type);
+        var label = await _inpostShipXClient.GetLabelWithDetailsAsync(settings, shipmentId, labelType);
         if (label.Content == null)
         {
             // ShipX udostępnia etykietę dopiero po zakupie oferty - pokazujemy konkretny powód z API.
@@ -43,6 +57,7 @@ public class InpostShipmentLabelController : RestfulControllerBase<InpostShipmen
             });
         }
 
-        return File(label.Content, "application/pdf", $"inpost-label-{shipmentId}.pdf");
+        var suffix = labelType == InpostLabelTypes.A6 ? "-a6" : string.Empty;
+        return File(label.Content, "application/pdf", $"inpost-label-{shipmentId}{suffix}.pdf");
     }
 }

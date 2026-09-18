@@ -47,6 +47,14 @@ public interface IInpostShipXClient
         CancellationToken ct = default);
 
     /// <summary>
+    /// Jak wyżej, z wyborem typu etykiety (<see cref="InpostLabelTypes"/>): domyślna „normal” to
+    /// strona A4, „A6” to pojedyncza etykieta 105 × 148 mm - format dla drukarek etykiet
+    /// (termicznych). Pusta lub nieznana wartość oznacza etykietę domyślną.
+    /// </summary>
+    Task<InpostLabelResult> GetLabelWithDetailsAsync(InpostSettings settings, string shipmentId,
+        string? labelType, CancellationToken ct = default);
+
+    /// <summary>
     /// Wyszukuje czynne paczkomaty po kodzie punktu, mieście lub kodzie pocztowym -
     /// pozwala wybrać paczkomat z listy zamiast wpisywać kod ręcznie.
     /// </summary>

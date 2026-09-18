@@ -22,6 +22,7 @@ public class InpostShipmentRecordVm
         TrackingNumber = x.TrackingNumber;
         Status = x.Status;
         ErrorMessage = x.ErrorMessage;
+        IsDelivered = InpostShipmentStatuses.IsDelivered(x.Status);
     }
 
     public int Id { get; set; }
@@ -35,4 +36,10 @@ public class InpostShipmentRecordVm
     public string? TrackingNumber { get; set; }
     public string? Status { get; set; }
     public string? ErrorMessage { get; set; }
+
+    /// <summary>
+    /// Przesyłka doręczona - panel nie pokazuje dla niej wydruku etykiety, a /InpostShipmentLabel
+    /// odmawia (409). Status sprawdzany jest w tle, patrz <see cref="InpostDeliveryTrackingSettings"/>.
+    /// </summary>
+    public bool IsDelivered { get; set; }
 }

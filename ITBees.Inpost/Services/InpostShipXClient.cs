@@ -336,10 +336,24 @@ public class InpostShipXClient : IInpostShipXClient
         return (await GetLabelWithDetailsAsync(settings, shipmentId, ct)).Content;
     }
 
-    public async Task<InpostLabelResult> GetLabelWithDetailsAsync(InpostSettings settings, string shipmentId,
+    public Task<InpostLabelResult> GetLabelWithDetailsAsync(InpostSettings settings, string shipmentId,
         CancellationToken ct = default)
     {
+        return GetLabelWithDetailsAsync(settings, shipmentId, null, ct);
+    }
+
+    public async Task<InpostLabelResult> GetLabelWithDetailsAsync(InpostSettings settings, string shipmentId,
+        string? labelType, CancellationToken ct = default)
+    {
         var url = $"{settings.BaseUrl.TrimEnd('/')}/v1/shipments/{shipmentId}/label?format=Pdf";
+
+        // Bez parametru ShipX zwraca etykietę „normal” (A4) - dokładamy go tylko dla A6.
+        var type = InpostLabelTypes.Normalize(labelType);
+        if (type != null && type != InpostLabelTypes.Normal)
+        {
+            url += $"&type={type}";
+        }
+
         using var request = CreateRequest(HttpMethod.Get, url, settings);
 
         HttpResponseMessage response;

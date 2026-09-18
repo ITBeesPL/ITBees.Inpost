@@ -4,7 +4,9 @@ Biblioteka pozwala tworzyć przesyłki (listy przewozowe) w API InPost ShipX:
 
 - przesyłki paczkomatowe (`inpost_locker_standard`) - gabaryty A/B/C (`small`/`medium`/`large`),
 - przesyłki kurierskie InPost (`inpost_courier_standard`) - gabaryty `small`/`medium`/`large`/`xlarge`,
-- pobieranie numeru listu przewozowego (tracking number) oraz etykiety PDF.
+- pobieranie numeru listu przewozowego (tracking number) oraz etykiety PDF,
+- sprawdzanie w tle, czy przesyłka została już doręczona (etykiety doręczonej przesyłki nie
+  drukujemy ponownie - patrz „Doręczenia”).
 
 Dodatkowo udostępnia wyszukiwarkę paczkomatów (`IInpostShipXClient.SearchParcelLockersAsync`
 oraz endpoint `GET /InpostParcelLockers?search=`), dzięki której punkt docelowy wybiera się
@@ -76,6 +78,44 @@ if (result.Success)
 
 Przesyłka tworzona jest w trybie uproszczonym ShipX (samo `service` + `parcels.template`),
 w którym oferta jest kupowana automatycznie - nie trzeba osobno potwierdzać oferty.
+
+## Etykieta
+
+`GET /InpostShipmentLabel?shipmentId=` zwraca etykietę PDF (dostępną dopiero po opłaceniu
+przesyłki - inaczej 404 z powodem z ShipX). Parametr `type` wybiera typ etykiety ShipX
+(`InpostLabelTypes`): bez niego (albo `normal`) - strona A4 do zwykłej drukarki, `type=A6` -
+pojedyncza etykieta 105 × 148 mm dla drukarki etykiet (np. drukowanie natychmiastowe przez
+ITBees.Printers). Nieznana wartość = etykieta domyślna. W kodzie:
+`client.GetLabelWithDetailsAsync(settings, shipmentId, InpostLabelTypes.A6)`.
+
+## Doręczenia
+
+Etykiety doręczonej przesyłki nie drukujemy ponownie. Rekord listy przesyłek
+(`InpostShipmentRecordVm`) ma flagę `IsDelivered` (status ShipX `delivered`) - panel ukrywa dla
+takiej przesyłki wydruk etykiety, a `GET /InpostShipmentLabel` odpowiada **409** z powodem
+w `message`. Przed wydrukiem etykiety przesyłki starszej niż doba jej status jest dodatkowo
+sprawdzany w ShipX na bieżąco (sprawdzanie w tle może być do godziny do tyłu).
+
+`InpostSetup.Register` uruchamia sprawdzanie w tle (`InpostDeliveryTrackingBackgroundService`):
+pierwszy przebieg 5 minut po starcie aplikacji, potem co godzinę. Sprawdzane są przesyłki
+utworzone w ShipX, starsze niż 24 h i nie starsze niż 60 dni, które nie mają jeszcze statusu
+końcowego (doręczona, anulowana, zwrócona do nadawcy - `InpostShipmentStatuses.IsFinal`). Stan
+jest wyłącznie odczytywany (`GET /v1/shipments/{id}`) - nic nie jest kupowane; zapisywany jest
+status, a przy okazji numer listu, jeśli ShipX dokończył opłatę po czasie. Po 3 błędach ShipX
+z rzędu przebieg się kończy, reszta przesyłek czeka na następny.
+
+```csharp
+new InpostSetup().Register(services, new InpostDeliveryTrackingSettings
+{
+    CheckInterval = TimeSpan.FromHours(1),   // co ile przebieg w tle
+    MinShipmentAge = TimeSpan.FromHours(24), // młodszych przesyłek nie sprawdzamy
+    MaxShipmentAge = TimeSpan.FromDays(60),  // starszych już nie sprawdzamy w tle; null = bez limitu
+    Enabled = true                           // false = bez tła (blokada wydruku działa nadal)
+});
+```
+
+Gdy z tej samej bazy korzysta kilka procesów, sprawdzanie w tle zostaw włączone tylko w jednym.
+Nowych kolumn w bazie nie ma - status trzyma dotychczasowe pole `InpostShipment.Status`.
 
 ## Test w sandboxie
 
