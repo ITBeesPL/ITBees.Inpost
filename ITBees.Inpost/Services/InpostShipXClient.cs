@@ -529,6 +529,10 @@ public class InpostShipXClient : IInpostShipXClient
         if (order.SendingMethod != null && !InpostSendingMethods.IsKnown(order.SendingMethod))
             return $"Nieprawidłowy sposób nadania przesyłki: {order.SendingMethod}.";
 
+        var amountsError = InpostShipmentAmounts.Validate(order.InsuranceAmount, order.CodAmount);
+        if (amountsError != null)
+            return amountsError;
+
         return null;
     }
 
@@ -564,6 +568,18 @@ public class InpostShipXClient : IInpostShipXClient
             ["comments"] = EmptyToNull(order.Comments)
         };
 
+        // Usługi dodatkowe: obie są obiektami {amount, currency}; ShipX przyjmuje pobranie tylko
+        // razem z ubezpieczeniem co najmniej na tę samą kwotę (sprawdzone wcześniej w Validate).
+        if (order.InsuranceAmount.HasValue)
+        {
+            body["insurance"] = Money(order.InsuranceAmount.Value);
+        }
+
+        if (order.CodAmount.HasValue)
+        {
+            body["cod"] = Money(order.CodAmount.Value);
+        }
+
         // sending_method jest wymagane także dla kuriera C2C - jego brak kończy się
         // błędem walidacji {"custom_attributes":[{"sending_method":["required"]}]}.
         var customAttributes = new Dictionary<string, object?>
@@ -580,6 +596,13 @@ public class InpostShipXClient : IInpostShipXClient
 
         return body;
     }
+
+    /// <summary>Kwota w formacie ShipX - grosze zaokrąglone, waluta zawsze PLN.</summary>
+    private static Dictionary<string, object?> Money(decimal amount) => new()
+    {
+        ["amount"] = decimal.Round(amount, 2, MidpointRounding.AwayFromZero),
+        ["currency"] = InpostShipmentAmounts.Currency
+    };
 
     private HttpRequestMessage CreateRequest(HttpMethod method, string url, InpostSettings settings)
     {

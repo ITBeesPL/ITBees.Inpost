@@ -23,7 +23,15 @@ public class InpostShipmentRecordVm
         Status = x.Status;
         ErrorMessage = x.ErrorMessage;
         IsDelivered = InpostShipmentStatuses.IsDelivered(x.Status);
+        InsuranceAmount = x.InsuranceAmount;
+        CodAmount = x.CodAmount;
     }
+
+    /// <summary>Kwota ubezpieczenia przesyłki w PLN (null - bez dodatkowego ubezpieczenia).</summary>
+    public decimal? InsuranceAmount { get; set; }
+
+    /// <summary>Kwota pobrania w PLN (null - przesyłka nie jest za pobraniem).</summary>
+    public decimal? CodAmount { get; set; }
 
     public int Id { get; set; }
     public DateTime Created { get; set; }

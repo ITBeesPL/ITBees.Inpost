@@ -17,5 +17,8 @@ public static class DbModelBuilder
         modelBuilder.Entity<InpostShipment>().HasIndex(x => x.Created);
         modelBuilder.Entity<InpostShipment>().HasIndex(x => x.ExternalGuid);
         modelBuilder.Entity<InpostShipment>().HasIndex(x => x.ExternalId);
+        // Kwoty w PLN z groszami - bez precyzji Pomelo zakłada kolumnę decimal(65,30).
+        modelBuilder.Entity<InpostShipment>().Property(x => x.InsuranceAmount).HasPrecision(10, 2);
+        modelBuilder.Entity<InpostShipment>().Property(x => x.CodAmount).HasPrecision(10, 2);
     }
 }

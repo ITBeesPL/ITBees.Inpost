@@ -41,4 +41,16 @@ public class CreateShipmentOrder
     /// danego typu przesyłki: Paczkomat dla paczkomatowej, odbiór przez kuriera dla kurierskiej.
     /// </summary>
     public string? SendingMethod { get; set; }
+
+    /// <summary>
+    /// Kwota ubezpieczenia przesyłki w PLN (usługa dodatkowa ShipX "insurance"), najwyżej
+    /// <see cref="InpostShipmentAmounts.MaxInsurance"/>. Null - bez dodatkowego ubezpieczenia.
+    /// </summary>
+    public decimal? InsuranceAmount { get; set; }
+
+    /// <summary>
+    /// Kwota pobrania w PLN (usługa dodatkowa ShipX "cod"), najwyżej <see cref="InpostShipmentAmounts.MaxCod"/>.
+    /// Przesyłka za pobraniem musi być ubezpieczona co najmniej na tę kwotę. Null - bez pobrania.
+    /// </summary>
+    public decimal? CodAmount { get; set; }
 }

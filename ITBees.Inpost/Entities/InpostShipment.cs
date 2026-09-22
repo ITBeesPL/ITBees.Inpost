@@ -38,4 +38,10 @@ public class InpostShipment
     public string? TrackingNumber { get; set; }
     public string? Status { get; set; }
     public string? ErrorMessage { get; set; }
+
+    /// <summary>Kwota ubezpieczenia przesyłki w PLN (null - bez dodatkowego ubezpieczenia).</summary>
+    public decimal? InsuranceAmount { get; set; }
+
+    /// <summary>Kwota pobrania w PLN (null - przesyłka nie jest za pobraniem).</summary>
+    public decimal? CodAmount { get; set; }
 }

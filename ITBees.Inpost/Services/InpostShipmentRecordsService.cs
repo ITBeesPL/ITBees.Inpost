@@ -68,7 +68,9 @@ public class InpostShipmentRecordsService : IInpostShipmentRecordsService
             InpostShipmentId = result.ShipmentId,
             TrackingNumber = result.TrackingNumber,
             Status = result.Status,
-            ErrorMessage = result.ErrorMessage
+            ErrorMessage = result.ErrorMessage,
+            InsuranceAmount = order.InsuranceAmount,
+            CodAmount = order.CodAmount
         });
 
         return new InpostShipmentVm(result, shipmentType, order.ParcelTemplate, order.TargetPoint);
